@@ -8,7 +8,6 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import path from "path";
-import { fileURLToPath } from "url";
 import pg from "pg";
 
 const { Pool } = pg;
@@ -53,12 +52,20 @@ const pool=new Pool({
 });
 
 const app=express(); app.disable("x-powered-by"); if(NODE_ENV==="production") app.set("trust proxy",1);
+
+const DIST_DIR=path.join(process.cwd(),"dist");
+const DIST_INDEX=path.join(DIST_DIR,"index.html");
+
 app.use(helmet({contentSecurityPolicy:false,crossOriginResourcePolicy:{policy:"cross-origin"}}));
 app.use(cors({origin(origin,cb){if(!origin||allowedOrigins.includes(origin))return cb(null,true);return cb(Object.assign(new Error("Origem não permitida."),{status:403}));},methods:["GET","POST","PUT","DELETE"],allowedHeaders:["Content-Type","Authorization"]}));
 app.use(express.json({limit:"200kb"}));
 const apiLimiter=rateLimit({windowMs:15*60*1000,max:300,standardHeaders:true,legacyHeaders:false,message:{error:"Muitas requisições. Tente novamente mais tarde."}});
 const authLimiter=rateLimit({windowMs:15*60*1000,max:8,standardHeaders:true,legacyHeaders:false,skipSuccessfulRequests:true,message:{error:"Muitas tentativas. Aguarde alguns minutos."}});
 app.use("/api",apiLimiter); app.use("/api/login",authLimiter); app.use("/api/register",authLimiter);
+
+// Frontend Vite/React: entrega os arquivos gerados pelo npm run build.
+app.use(express.static(DIST_DIR));
+
 
 async function initDb(){
  // Ordem: tabelas-pai primeiro, para que as chaves estrangeiras funcionem
@@ -353,12 +360,12 @@ app.post("/api/ai-reply",auth,requireAccess,async(req,res)=>{
  res.json({reply:`Olá, ${customer}! Tudo bem? 😊 Recebemos sua mensagem e queremos ajudar. Podemos continuar seu atendimento por aqui?`});
 });
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const distPath = path.join(__dirname, "dist");
-app.use(express.static(distPath));
-app.get("/", (req,res)=>res.sendFile(path.join(distPath,"index.html")));
-app.get(/^\/(?!api(?:\/|$)|health(?:\/|$)).*/, (req,res)=>res.sendFile(path.join(distPath,"index.html")));
+// SPA fallback: qualquer rota de página que não seja /api retorna o index.html.
+app.get(/^\/(?!api(?:\/|$)).*/, (req,res,next)=>{
+  res.sendFile(DIST_INDEX, err => {
+    if(err) next(err);
+  });
+});
 
 app.use((err,req,res,next)=>{console.error(`[${new Date().toISOString()}]`,err.message);if(res.headersSent)return next(err);res.status(err.status||500).json({error:err.status&&err.status<500?err.message:"Erro interno do servidor."})});
 const dbReady=initDb().catch(err=>{console.error("Falha ao iniciar PostgreSQL:",err.message);throw err});
