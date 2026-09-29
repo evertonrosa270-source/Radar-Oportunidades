@@ -61,6 +61,7 @@ app.use(express.json({limit:"200kb"}));
 const apiCors=cors({origin(origin,cb){if(!origin||allowedOrigins.includes(origin))return cb(null,true);return cb(Object.assign(new Error("Origem não permitida."),{status:403}));},methods:["GET","POST","PUT","DELETE"],allowedHeaders:["Content-Type","Authorization"]});
 const apiLimiter=rateLimit({windowMs:15*60*1000,max:300,standardHeaders:true,legacyHeaders:false,message:{error:"Muitas requisições. Tente novamente mais tarde."}});
 const authLimiter=rateLimit({windowMs:15*60*1000,max:8,standardHeaders:true,legacyHeaders:false,skipSuccessfulRequests:true,message:{error:"Muitas tentativas. Aguarde alguns minutos."}});
+app.use(express.static(DIST_DIR, { index: false }));
 app.use("/api",apiCors,apiLimiter); app.use("/api/login",authLimiter); app.use("/api/register",authLimiter); app.use("/api/auth/google",authLimiter);
 
 async function initDb(){
