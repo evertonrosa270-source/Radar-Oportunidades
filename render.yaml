@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: radar-oportunidades-api
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PGSSL
+        value: "true"
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: MERCADOPAGO_ACCESS_TOKEN
+        sync: false
+      - key: MP_PLAN_RADAR_START
+        sync: false
+      - key: MP_PLAN_RADAR_PRO
+        sync: false
+      - key: MP_PLAN_RADAR_BUSINESS
+        sync: false

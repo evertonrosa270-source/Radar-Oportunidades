@@ -1,0 +1,6 @@
+IMPORTANTE — RADAR V5
+
+Esta versão não inclui o arquivo .env por segurança.
+Extraia o conteúdo deste ZIP por cima da pasta RADAR-V8 atual e mantenha o seu .env existente.
+Não é necessário digitar novamente senha do PostgreSQL, JWT ou token do Mercado Pago.
+Se você apagar a pasta antiga antes de extrair, copie o .env da pasta antiga para a nova.
