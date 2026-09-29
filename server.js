@@ -62,6 +62,29 @@ const apiCors=cors({origin(origin,cb){if(!origin||allowedOrigins.includes(origin
 const apiLimiter=rateLimit({windowMs:15*60*1000,max:300,standardHeaders:true,legacyHeaders:false,message:{error:"Muitas requisições. Tente novamente mais tarde."}});
 const authLimiter=rateLimit({windowMs:15*60*1000,max:8,standardHeaders:true,legacyHeaders:false,skipSuccessfulRequests:true,message:{error:"Muitas tentativas. Aguarde alguns minutos."}});
 app.use(express.static(DIST_DIR, { index: false }));
+
+// Webhook oficial da Meta / WhatsApp Business Platform.
+// A Meta chama esta rota por GET para validar o endpoint e por POST para entregar eventos.
+const WHATSAPP_VERIFY_TOKEN=String(process.env.WHATSAPP_VERIFY_TOKEN||"").trim();
+app.get("/api/webhook/whatsapp",(req,res)=>{
+  const mode=String(req.query["hub.mode"]||"");
+  const token=String(req.query["hub.verify_token"]||"");
+  const challenge=String(req.query["hub.challenge"]||"");
+  if(!WHATSAPP_VERIFY_TOKEN) return res.status(503).send("Webhook do WhatsApp não configurado.");
+  if(mode==="subscribe" && token===WHATSAPP_VERIFY_TOKEN && challenge) return res.status(200).send(challenge);
+  return res.sendStatus(403);
+});
+app.post("/api/webhook/whatsapp",(req,res)=>{
+  try{
+    const body=req.body||{};
+    console.log("[RADAR] Webhook WhatsApp recebido:",JSON.stringify(body));
+    // Acknowledge imediatamente para a Meta; o processamento de mensagens será feito a seguir.
+    return res.sendStatus(200);
+  }catch(e){
+    console.error("[RADAR] Erro no webhook WhatsApp:",e.message);
+    return res.sendStatus(200);
+  }
+});
 app.use("/api",apiCors,apiLimiter); app.use("/api/login",authLimiter); app.use("/api/register",authLimiter); app.use("/api/auth/google",authLimiter);
 
 async function initDb(){

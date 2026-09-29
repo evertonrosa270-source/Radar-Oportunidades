@@ -28,3 +28,13 @@ A opção da interface registra a intenção do usuário. A disponibilidade de m
 ## Não enviar segredo pelo chat
 
 Nunca cole um Access Token da Meta, senha do banco ou credencial do Mercado Pago na conversa ou no GitHub.
+
+
+## Webhook implementado
+
+Callback URL:
+`https://radar-oportunidades-xrn8.onrender.com/api/webhook/whatsapp`
+
+O backend responde ao desafio `hub.challenge` quando `hub.verify_token` coincide com `WHATSAPP_VERIFY_TOKEN`.
+
+No Render, configure `WHATSAPP_VERIFY_TOKEN` com o mesmo valor usado no Meta.
