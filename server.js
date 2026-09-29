@@ -7,6 +7,8 @@ import rateLimit from "express-rate-limit";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
+import path from "path";
+import { fileURLToPath } from "url";
 import pg from "pg";
 
 const { Pool } = pg;
@@ -350,6 +352,13 @@ app.post("/api/ai-reply",auth,requireAccess,async(req,res)=>{
  const customer=cleanText(req.body?.customer||"cliente",120); const message=cleanText(req.body?.message,5000); if(!message)return res.status(400).json({error:"Informe a mensagem do cliente."});
  res.json({reply:`Olá, ${customer}! Tudo bem? 😊 Recebemos sua mensagem e queremos ajudar. Podemos continuar seu atendimento por aqui?`});
 });
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const distPath = path.join(__dirname, "dist");
+app.use(express.static(distPath));
+app.get("/", (req,res)=>res.sendFile(path.join(distPath,"index.html")));
+app.get(/^\/(?!api(?:\/|$)|health(?:\/|$)).*/, (req,res)=>res.sendFile(path.join(distPath,"index.html")));
 
 app.use((err,req,res,next)=>{console.error(`[${new Date().toISOString()}]`,err.message);if(res.headersSent)return next(err);res.status(err.status||500).json({error:err.status&&err.status<500?err.message:"Erro interno do servidor."})});
 const dbReady=initDb().catch(err=>{console.error("Falha ao iniciar PostgreSQL:",err.message);throw err});
