@@ -14,3 +14,29 @@
 .trial-banner{display:flex;align-items:center;gap:14px;padding:15px 18px;margin-bottom:18px;border:1px solid #3b4560;border-radius:15px;background:#141b2a}.trial-icon{font-size:24px}.trial-banner b,.trial-banner span{display:block}.trial-banner span{color:#8f9aaf;font-size:12px;margin-top:4px}.trial-banner.compact{margin-bottom:20px}.trial-banner.compact button{margin-left:auto;border:1px solid #343e53;background:#20283a;color:#dce3f0;border-radius:9px;padding:9px 12px;cursor:pointer}.usage-card{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:18px}.usage-card>div{padding:15px;border:1px solid #2b3445;border-radius:14px;background:#111722}.usage-card b,.usage-card span{display:block}.usage-card span{color:#8f9aaf;font-size:12px;margin-top:5px}.plan-current{border-color:#5967a0;box-shadow:0 0 0 1px #5967a0}.current-badge{display:inline-block;margin-bottom:8px;padding:5px 8px;border-radius:99px;background:#252e4a;color:#aeb9ff;font-size:9px;font-weight:800;letter-spacing:1px}.plan-features{list-style:none;padding:0;margin:18px 0;display:grid;gap:8px;color:#b9c2d1;font-size:12px;line-height:1.35}.secondary{width:100%;margin-top:8px;border:1px solid #343e53;border-radius:11px;padding:13px 17px;background:#20283a;color:#cdd5e4;font-weight:700}.primary:disabled,.secondary:disabled{opacity:.65;cursor:not-allowed}@media(max-width:800px){.usage-card{grid-template-columns:1fr}.trial-banner{align-items:flex-start}.trial-banner.compact{flex-wrap:wrap}.trial-banner.compact button{margin-left:0}}
 
 .upgrade-card{max-width:620px;padding:30px;border:1px solid #3b4560;border-radius:20px;background:linear-gradient(145deg,#151b29,#10141d)}.upgrade-icon{font-size:32px}.upgrade-card h3{font-size:24px;margin:10px 0}.upgrade-card p{color:#929daf;line-height:1.6}.upgrade-card .primary{margin-top:10px}
+
+/* =====================================================
+   AUTENTICAÇÃO GOOGLE
+===================================================== */
+.google-button {
+    min-height: 44px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    margin: 14px 0 4px;
+}
+.auth-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: #7f8aa3;
+    font-size: 12px;
+    margin: 10px 0 12px;
+}
+.auth-divider::before,
+.auth-divider::after {
+    content: "";
+    height: 1px;
+    flex: 1;
+    background: #293246;
+}

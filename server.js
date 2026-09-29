@@ -7,8 +7,8 @@ import rateLimit from "express-rate-limit";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
-import path from "path";
 import pg from "pg";
+import path from "path";
 
 const { Pool } = pg;
 const PORT=Number(process.env.PORT||3000);
@@ -26,11 +26,13 @@ const IS_VERCEL=String(process.env.VERCEL||"")==="1";
 const LOCAL_TEST_MODE=LOCAL_TEST_FLAG && NODE_ENV!=="production" && !IS_VERCEL;
 const APP_URL=(process.env.APP_URL||`http://localhost:${5173}`).trim();
 const ADMIN_EMAIL=(process.env.ADMIN_EMAIL||"").trim().toLowerCase();
+const GOOGLE_CLIENT_ID=(process.env.GOOGLE_CLIENT_ID||"").trim();
 const MP_API="https://api.mercadopago.com";
 
 if(NODE_ENV==="production" && (!JWT_SECRET || JWT_SECRET.length<32)) throw new Error("JWT_SECRET forte (mínimo 32 caracteres) é obrigatório em produção.");
 const SECRET=JWT_SECRET||"dev-only-secret-change-before-production-123456";
-const allowedOrigins=(process.env.ALLOWED_ORIGINS||"http://localhost:5173,http://127.0.0.1:5173").split(",").map(x=>x.trim()).filter(Boolean);
+const configuredOrigins=(process.env.ALLOWED_ORIGINS||"").split(",").map(x=>x.trim()).filter(Boolean);
+const allowedOrigins=Array.from(new Set([...configuredOrigins,"http://localhost:5173","http://127.0.0.1:5173","https://radar-oportunidades-xrn8.onrender.com","https://radar-oportunidades-eit4-three.vercel.app"]));
 
 // V8.1 aceita dois formatos:
 // 1) DATABASE_URL completa
@@ -52,19 +54,14 @@ const pool=new Pool({
 });
 
 const app=express(); app.disable("x-powered-by"); if(NODE_ENV==="production") app.set("trust proxy",1);
-
 const DIST_DIR=path.join(process.cwd(),"dist");
 const DIST_INDEX=path.join(DIST_DIR,"index.html");
-
 app.use(helmet({contentSecurityPolicy:false,crossOriginResourcePolicy:{policy:"cross-origin"}}));
 app.use(express.json({limit:"200kb"}));
 const apiCors=cors({origin(origin,cb){if(!origin||allowedOrigins.includes(origin))return cb(null,true);return cb(Object.assign(new Error("Origem não permitida."),{status:403}));},methods:["GET","POST","PUT","DELETE"],allowedHeaders:["Content-Type","Authorization"]});
 const apiLimiter=rateLimit({windowMs:15*60*1000,max:300,standardHeaders:true,legacyHeaders:false,message:{error:"Muitas requisições. Tente novamente mais tarde."}});
 const authLimiter=rateLimit({windowMs:15*60*1000,max:8,standardHeaders:true,legacyHeaders:false,skipSuccessfulRequests:true,message:{error:"Muitas tentativas. Aguarde alguns minutos."}});
-app.use("/api",apiCors,apiLimiter); app.use("/api/login",authLimiter); app.use("/api/register",authLimiter);
-
-// Frontend Vite/React: arquivos estáticos não passam pelo CORS da API.
-app.use(express.static(DIST_DIR));
+app.use("/api",apiCors,apiLimiter); app.use("/api/login",authLimiter); app.use("/api/register",authLimiter); app.use("/api/auth/google",authLimiter);
 
 async function initDb(){
  // Ordem: tabelas-pai primeiro, para que as chaves estrangeiras funcionem
@@ -75,10 +72,14 @@ async function initDb(){
    id UUID PRIMARY KEY,
    name VARCHAR(120) NOT NULL,
    email VARCHAR(254) NOT NULL UNIQUE,
-   password_hash TEXT NOT NULL,
+   password_hash TEXT,
+   google_sub VARCHAR(255) UNIQUE,
    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
  );`);
 
+ await pool.query(`ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;`);
+ await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub VARCHAR(255);`);
+ await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_unique ON users(google_sub) WHERE google_sub IS NOT NULL;`);
  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_started_at TIMESTAMPTZ;`);
  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ;`);
 
@@ -342,8 +343,70 @@ app.post("/api/webhooks/mercadopago",async(req,res)=>{
 });
 
 app.get("/health",async(req,res)=>{try{await pool.query("SELECT 1");res.json({ok:true,database:"connected",environment:NODE_ENV})}catch{res.status(503).json({ok:false,database:"disconnected"})}});
+let googleKeysCache=null;
+let googleKeysExpiresAt=0;
+function base64UrlJson(value){return JSON.parse(Buffer.from(value,"base64url").toString("utf8"));}
+async function googleKeys(){
+ const now=Date.now();
+ if(googleKeysCache && googleKeysExpiresAt>now)return googleKeysCache;
+ const response=await fetch("https://www.googleapis.com/oauth2/v3/certs");
+ if(!response.ok)throw new Error("Não foi possível consultar as chaves do Google.");
+ const data=await response.json();
+ const cacheControl=response.headers.get("cache-control")||"";
+ const maxAge=Number((cacheControl.match(/max-age=(\\d+)/i)||[])[1]||3600);
+ googleKeysCache=data.keys||[]; googleKeysExpiresAt=now+Math.max(300,Math.min(maxAge,86400))*1000;
+ return googleKeysCache;
+}
+async function verifyGoogleIdToken(idToken){
+ if(!GOOGLE_CLIENT_ID)throw Object.assign(new Error("Login com Google ainda não está configurado no servidor."),{status:503});
+ const parts=String(idToken||"").split(".");
+ if(parts.length!==3)throw Object.assign(new Error("Credencial do Google inválida."),{status:401});
+ let header,payload;
+ try{header=base64UrlJson(parts[0]);payload=base64UrlJson(parts[1]);}catch{throw Object.assign(new Error("Credencial do Google inválida."),{status:401});}
+ if(header.alg!=="RS256"||!header.kid)throw Object.assign(new Error("Assinatura do Google inválida."),{status:401});
+ const key=(await googleKeys()).find(k=>k.kid===header.kid && k.kty==="RSA");
+ if(!key)throw Object.assign(new Error("Chave de assinatura do Google não encontrada."),{status:401});
+ const publicKey=crypto.createPublicKey({key,format:"jwk"});
+ const valid=crypto.verify("RSA-SHA256",Buffer.from(parts[0]+"."+parts[1]),publicKey,Buffer.from(parts[2],"base64url"));
+ if(!valid)throw Object.assign(new Error("Credencial do Google inválida."),{status:401});
+ const issuer=String(payload.iss||"");
+ const audiences=Array.isArray(payload.aud)?payload.aud:[payload.aud];
+ const now=Math.floor(Date.now()/1000);
+ if(issuer!=="https://accounts.google.com" && issuer!=="accounts.google.com")throw Object.assign(new Error("Emissor do Google inválido."),{status:401});
+ if(!audiences.includes(GOOGLE_CLIENT_ID))throw Object.assign(new Error("Credencial do Google não pertence a este aplicativo."),{status:401});
+ if(!payload.sub||!payload.email||payload.email_verified!==true)throw Object.assign(new Error("A conta Google precisa ter um e-mail verificado."),{status:401});
+ if(!Number.isFinite(Number(payload.exp))||Number(payload.exp)<=now)throw Object.assign(new Error("A credencial do Google expirou."),{status:401});
+ return payload;
+}
 app.post("/api/register",async(req,res)=>{const name=cleanText(req.body?.name,120),email=cleanText(req.body?.email,254).toLowerCase(),password=String(req.body?.password||"");if(name.length<2||!validEmail(email)||password.length<8)return res.status(400).json({error:"Informe nome válido, e-mail válido e senha com pelo menos 8 caracteres."});const userId=id();const client=await pool.connect();try{const hash=await bcrypt.hash(password,12);await client.query("BEGIN");await client.query("INSERT INTO users(id,name,email,password_hash,trial_started_at,trial_ends_at) VALUES($1,$2,$3,$4,NOW(),NOW()+INTERVAL '1 day')",[userId,name,email,hash]);await client.query("INSERT INTO companies(user_id) VALUES($1)",[userId]);await client.query("COMMIT")}catch(e){await client.query("ROLLBACK").catch(()=>{});if(e.code==="23505")return res.status(409).json({error:"Este e-mail já possui uma conta."});throw e}finally{client.release()}const user=await getPublicUser(userId);const token=jwt.sign({id:user.id,email:user.email},SECRET,{algorithm:"HS256",expiresIn:"8h"});res.status(201).json({token,user})});
-app.post("/api/login",async(req,res)=>{const email=cleanText(req.body?.email,254).toLowerCase(),password=String(req.body?.password||"");const q=await pool.query("SELECT id,email,password_hash,trial_ends_at FROM users WHERE email=$1",[email]);const u=q.rows[0];if(!u||!(await bcrypt.compare(password,u.password_hash)))return res.status(401).json({error:"E-mail ou senha incorretos."});if(!u.trial_ends_at)await pool.query("UPDATE users SET trial_started_at=COALESCE(trial_started_at,NOW()),trial_ends_at=NOW()+INTERVAL '1 day' WHERE id=$1",[u.id]);const user=await getPublicUser(u.id);const token=jwt.sign({id:user.id,email:user.email},SECRET,{algorithm:"HS256",expiresIn:"8h"});res.json({token,user})});
+app.post("/api/auth/google",async(req,res)=>{
+ try{
+  const payload=await verifyGoogleIdToken(req.body?.credential);
+  const googleSub=String(payload.sub);
+  const email=cleanText(payload.email,254).toLowerCase();
+  const name=cleanText(payload.name||payload.given_name||email.split("@")[0],120);
+  const existingByGoogle=(await pool.query("SELECT id,email FROM users WHERE google_sub=$1",[googleSub])).rows[0];
+  let userId=existingByGoogle?.id;
+  if(!userId){
+   const existingByEmail=(await pool.query("SELECT id,email,password_hash,google_sub FROM users WHERE email=$1",[email])).rows[0];
+   if(existingByEmail){
+    const isGmail=email.endsWith("@gmail.com");
+    if(!isGmail && !existingByEmail.google_sub)return res.status(409).json({error:"Este e-mail já possui uma conta. Entre com sua senha para continuar."});
+    await pool.query("UPDATE users SET google_sub=$1 WHERE id=$2",[googleSub,existingByEmail.id]);
+    userId=existingByEmail.id;
+   }else{
+    userId=id();
+    await pool.query("INSERT INTO users(id,name,email,password_hash,google_sub,trial_started_at,trial_ends_at) VALUES($1,$2,$3,NULL,$4,NOW(),NOW()+INTERVAL '1 day')",[userId,name,email,googleSub]);
+    await pool.query("INSERT INTO companies(user_id) VALUES($1)",[userId]);
+   }
+  }
+  const user=await getPublicUser(userId);
+  if(!user)return res.status(404).json({error:"Não foi possível carregar a conta Google."});
+  const token=jwt.sign({id:user.id,email:user.email},SECRET,{algorithm:"HS256",expiresIn:"8h"});
+  res.json({token,user});
+ }catch(e){res.status(e.status&&e.status<500?e.status:502).json({error:e.message||"Não foi possível entrar com Google."});}
+});
+app.post("/api/login",async(req,res)=>{const email=cleanText(req.body?.email,254).toLowerCase(),password=String(req.body?.password||"");const q=await pool.query("SELECT id,email,password_hash,google_sub,trial_ends_at FROM users WHERE email=$1",[email]);const u=q.rows[0];if(!u)return res.status(401).json({error:"E-mail ou senha incorretos."});if(!u.password_hash)return res.status(401).json({error:"Esta conta foi criada com Google. Use o botão Continuar com Google."});if(!(await bcrypt.compare(password,u.password_hash)))return res.status(401).json({error:"E-mail ou senha incorretos."});if(!u.trial_ends_at)await pool.query("UPDATE users SET trial_started_at=COALESCE(trial_started_at,NOW()),trial_ends_at=NOW()+INTERVAL '1 day' WHERE id=$1",[u.id]);const user=await getPublicUser(u.id);const token=jwt.sign({id:user.id,email:user.email},SECRET,{algorithm:"HS256",expiresIn:"8h"});res.json({token,user})});
 app.get("/api/me",auth,async(req,res)=>{const u=await getPublicUser(req.user.id);if(!u)return res.status(404).json({error:"Usuário não encontrado."});res.json({user:u})});
 app.put("/api/company",auth,requireAccess,async(req,res)=>{const c={name:cleanText(req.body?.name,120),segment:cleanText(req.body?.segment,80),website:cleanText(req.body?.website,300),whatsappLink:cleanText(req.body?.whatsappLink,300)};if(!validUrl(c.website)||!validUrl(c.whatsappLink))return res.status(400).json({error:"Links devem começar com http:// ou https://"});await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link) VALUES($1,$2,$3,$4,$5) ON CONFLICT(user_id) DO UPDATE SET name=EXCLUDED.name,segment=EXCLUDED.segment,website=EXCLUDED.website,whatsapp_link=EXCLUDED.whatsapp_link,updated_at=NOW()`,[req.user.id,c.name,c.segment,c.website,c.whatsappLink]);res.json({company:c})});
 app.put("/api/whatsapp-settings",auth,requireAccess,async(req,res)=>{const loadHistory=req.body?.loadHistory!==false;await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link,whatsapp_load_history) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(user_id) DO UPDATE SET whatsapp_load_history=EXCLUDED.whatsapp_load_history,updated_at=NOW()`,[req.user.id,"","","","",loadHistory]);res.json({whatsappLoadHistory:loadHistory})});
@@ -359,12 +422,7 @@ app.post("/api/ai-reply",auth,requireAccess,async(req,res)=>{
  res.json({reply:`Olá, ${customer}! Tudo bem? 😊 Recebemos sua mensagem e queremos ajudar. Podemos continuar seu atendimento por aqui?`});
 });
 
-// React SPA fallback: rotas de página retornam o index.html.
-app.get(/^\/(?!api(?:\/|$)).*/, (req,res,next)=>{
-  res.sendFile(DIST_INDEX, err => {
-    if(err) next(err);
-  });
-});
+app.get(/^\/(?!api(?:\/|$)).*/, (req,res,next)=>{res.sendFile(DIST_INDEX,err=>{if(err)next(err);});});
 
 app.use((err,req,res,next)=>{console.error(`[${new Date().toISOString()}]`,err.message);if(res.headersSent)return next(err);res.status(err.status||500).json({error:err.status&&err.status<500?err.message:"Erro interno do servidor."})});
 const dbReady=initDb().catch(err=>{console.error("Falha ao iniciar PostgreSQL:",err.message);throw err});
