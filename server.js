@@ -57,15 +57,14 @@ const DIST_DIR=path.join(process.cwd(),"dist");
 const DIST_INDEX=path.join(DIST_DIR,"index.html");
 
 app.use(helmet({contentSecurityPolicy:false,crossOriginResourcePolicy:{policy:"cross-origin"}}));
-app.use(cors({origin(origin,cb){if(!origin||allowedOrigins.includes(origin))return cb(null,true);return cb(Object.assign(new Error("Origem não permitida."),{status:403}));},methods:["GET","POST","PUT","DELETE"],allowedHeaders:["Content-Type","Authorization"]}));
 app.use(express.json({limit:"200kb"}));
+const apiCors=cors({origin(origin,cb){if(!origin||allowedOrigins.includes(origin))return cb(null,true);return cb(Object.assign(new Error("Origem não permitida."),{status:403}));},methods:["GET","POST","PUT","DELETE"],allowedHeaders:["Content-Type","Authorization"]});
 const apiLimiter=rateLimit({windowMs:15*60*1000,max:300,standardHeaders:true,legacyHeaders:false,message:{error:"Muitas requisições. Tente novamente mais tarde."}});
 const authLimiter=rateLimit({windowMs:15*60*1000,max:8,standardHeaders:true,legacyHeaders:false,skipSuccessfulRequests:true,message:{error:"Muitas tentativas. Aguarde alguns minutos."}});
-app.use("/api",apiLimiter); app.use("/api/login",authLimiter); app.use("/api/register",authLimiter);
+app.use("/api",apiCors,apiLimiter); app.use("/api/login",authLimiter); app.use("/api/register",authLimiter);
 
-// Frontend Vite/React: entrega os arquivos gerados pelo npm run build.
+// Frontend Vite/React: arquivos estáticos não passam pelo CORS da API.
 app.use(express.static(DIST_DIR));
-
 
 async function initDb(){
  // Ordem: tabelas-pai primeiro, para que as chaves estrangeiras funcionem
@@ -360,7 +359,7 @@ app.post("/api/ai-reply",auth,requireAccess,async(req,res)=>{
  res.json({reply:`Olá, ${customer}! Tudo bem? 😊 Recebemos sua mensagem e queremos ajudar. Podemos continuar seu atendimento por aqui?`});
 });
 
-// SPA fallback: qualquer rota de página que não seja /api retorna o index.html.
+// React SPA fallback: rotas de página retornam o index.html.
 app.get(/^\/(?!api(?:\/|$)).*/, (req,res,next)=>{
   res.sendFile(DIST_INDEX, err => {
     if(err) next(err);
