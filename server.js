@@ -63,6 +63,13 @@ const apiLimiter=rateLimit({windowMs:15*60*1000,max:300,standardHeaders:true,leg
 const authLimiter=rateLimit({windowMs:15*60*1000,max:8,standardHeaders:true,legacyHeaders:false,skipSuccessfulRequests:true,message:{error:"Muitas tentativas. Aguarde alguns minutos."}});
 app.use(express.static(DIST_DIR, { index: false }));
 
+// Páginas legais: servidas diretamente do diretório public para continuarem
+// disponíveis mesmo se o build do frontend não copiar os arquivos estáticos.
+const LEGAL_DIR=path.join(process.cwd(),"public");
+app.get("/politica-de-privacidade/", (_req,res)=>res.sendFile(path.join(LEGAL_DIR,"politica-de-privacidade","index.html")));
+app.get("/termos-de-servico/", (_req,res)=>res.sendFile(path.join(LEGAL_DIR,"termos-de-servico","index.html")));
+app.get("/legal.css", (_req,res)=>res.sendFile(path.join(LEGAL_DIR,"legal.css")));
+
 
 // Webhook oficial da Meta / WhatsApp Business Platform.
 // A Meta chama esta rota por GET para validar o endpoint e por POST para entregar eventos.
