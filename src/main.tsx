@@ -1,6 +1,6 @@
 import React,{useEffect,useRef,useState}from"react";
 import{createRoot}from"react-dom/client";
-import{LayoutDashboard,MessageSquare,Package,Building2,LogOut,Plus,Trash2,Link2,Menu,X,MessageCircle,FlaskConical,ChevronDown,ChevronUp,Brain,CreditCard,Info as InfoIcon,Clock3,Sparkles,Zap,BarChart3,CheckCircle2}from"lucide-react";
+import{LayoutDashboard,MessageSquare,Package,Building2,LogOut,Plus,Trash2,Link2,Menu,X,MessageCircle,FlaskConical,ChevronDown,ChevronUp,Brain,CreditCard,Info as InfoIcon,Clock3,Sparkles,Zap,BarChart3,CheckCircle2,ShieldCheck,Users}from"lucide-react";
 import"./styles.css";
 const API=(import.meta.env.VITE_API_URL||"/api").replace(/\/$/,"");
 const GOOGLE_CLIENT_ID=String(import.meta.env.VITE_GOOGLE_CLIENT_ID||"").trim();
