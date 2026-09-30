@@ -99,9 +99,9 @@ async function whatsappGraphRequest(pathname,{method="GET",body=null}={}){
 }
 
 async function validateAndSubscribeWhatsapp({phoneNumberId,businessAccountId}){
-  const owned=await whatsappGraphRequest(`/${encodeURIComponent(phoneNumberId)}?fields=id,display_phone_number,verified_name,whatsapp_business_account`);
+  const owned=await whatsappGraphRequest(`/${encodeURIComponent(phoneNumberId)}?fields=id,display_phone_number,verified_name,`);
   if(String(owned?.id||"")!==String(phoneNumberId)) throw new Error("A Meta retornou um Phone Number ID diferente do informado.");
-  const metaWaba=String(owned?.whatsapp_business_account?.id||"");
+  const metaWaba=String(owned?.?.id||"");
   const resolvedWaba=String(businessAccountId||metaWaba||"");
   if(businessAccountId && metaWaba && metaWaba!==String(businessAccountId)) throw new Error("O Phone Number ID informado não pertence ao WhatsApp Business Account ID informado.");
   if(!resolvedWaba) throw new Error("A Meta não informou o WhatsApp Business Account ID deste número. Confirme o WABA ID e as permissões do token.");
@@ -152,7 +152,7 @@ app.post("/api/webhook/whatsapp",async(req,res)=>{
           companyRow=(await pool.query(`SELECT user_id FROM companies WHERE whatsapp_phone_number_id=$1 LIMIT 1`,[WHATSAPP_ENV_PHONE_NUMBER_ID])).rows[0]||null;
         }
         if(!companyRow && businessAccountId){
-          companyRow=(await pool.query(`SELECT user_id FROM companies WHERE whatsapp_business_account_id=$1 ORDER BY updated_at DESC LIMIT 1`,[businessAccountId])).rows[0]||null;
+          companyRow=(await pool.query(`SELECT user_id FROM companies WHERE _id=$1 ORDER BY updated_at DESC LIMIT 1`,[businessAccountId])).rows[0]||null;
         }
         if(!companyRow){
           waDiag.unmatchedCount++;waDiag.lastUnmatchedAt=new Date().toISOString();
@@ -234,7 +234,7 @@ async function initDb(){
 
  await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS whatsapp_load_history BOOLEAN NOT NULL DEFAULT TRUE;`);
  await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS whatsapp_phone_number_id VARCHAR(40);`);
- await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS whatsapp_business_account_id VARCHAR(40);`);
+ await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS _id VARCHAR(40);`);
  await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS whatsapp_connected_at TIMESTAMPTZ;`);
 
  await pool.query(`CREATE TABLE IF NOT EXISTS products (
@@ -362,9 +362,9 @@ async function requireMessageCapacity(req,res,next){try{const e=req.entitlements
 async function requireProductCapacity(req,res,next){try{const e=req.entitlements||await getEntitlements(req.user.id);if(e.productsUsed>=e.productLimit)return res.status(429).json({error:`Seu plano permite até ${e.productLimit.toLocaleString('pt-BR')} produtos/serviços. Faça upgrade para cadastrar mais.`,code:"PRODUCT_LIMIT",limit:e.productLimit,used:e.productsUsed});req.entitlements=e;next()}catch(e){next(e)}}
 
 async function getPublicUser(userId){
- const q=await pool.query(`SELECT u.id,u.name,u.email,u.trial_started_at,u.trial_ends_at,c.name company_name,c.segment,c.website,c.whatsapp_link,c.whatsapp_load_history,c.whatsapp_phone_number_id,c.whatsapp_business_account_id,c.whatsapp_connected_at FROM users u LEFT JOIN companies c ON c.user_id=u.id WHERE u.id=$1`,[userId]);
+ const q=await pool.query(`SELECT u.id,u.name,u.email,u.trial_started_at,u.trial_ends_at,c.name company_name,c.segment,c.website,c.whatsapp_link,c.whatsapp_load_history,c.whatsapp_phone_number_id,c._id,c.whatsapp_connected_at FROM users u LEFT JOIN companies c ON c.user_id=u.id WHERE u.id=$1`,[userId]);
  const u=q.rows[0]; if(!u)return null; const access=await getEntitlements(userId);
- return {id:u.id,name:u.name,email:u.email,trialStartedAt:u.trial_started_at,trialEndsAt:u.trial_ends_at,access:{...access,canUse:access.canUse},company:{name:u.company_name||"",segment:u.segment||"",website:u.website||"",whatsappLink:u.whatsapp_link||"",whatsappLoadHistory:u.whatsapp_load_history!==false,whatsappPhoneNumberId:u.whatsapp_phone_number_id||"",whatsappBusinessAccountId:u.whatsapp_business_account_id||"",whatsappConnectedAt:u.whatsapp_connected_at||null}}
+ return {id:u.id,name:u.name,email:u.email,trialStartedAt:u.trial_started_at,trialEndsAt:u.trial_ends_at,access:{...access,canUse:access.canUse},company:{name:u.company_name||"",segment:u.segment||"",website:u.website||"",whatsappLink:u.whatsapp_link||"",whatsappLoadHistory:u.whatsapp_load_history!==false,whatsappPhoneNumberId:u.whatsapp_phone_number_id||"",whatsappBusinessAccountId:u._id||"",whatsappConnectedAt:u.whatsapp_connected_at||null}}
 }
 
 function normalize(v){return String(v??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim()}
@@ -562,12 +562,12 @@ app.post("/api/login",async(req,res)=>{const email=cleanText(req.body?.email,254
 app.get("/api/me",auth,async(req,res)=>{const u=await getPublicUser(req.user.id);if(!u)return res.status(404).json({error:"Usuário não encontrado."});res.json({user:u})});
 app.put("/api/company",auth,requireAccess,async(req,res)=>{const c={name:cleanText(req.body?.name,120),segment:cleanText(req.body?.segment,80),website:cleanText(req.body?.website,300),whatsappLink:cleanText(req.body?.whatsappLink,300)};if(!validUrl(c.website)||!validUrl(c.whatsappLink))return res.status(400).json({error:"Links devem começar com http:// ou https://"});await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link) VALUES($1,$2,$3,$4,$5) ON CONFLICT(user_id) DO UPDATE SET name=EXCLUDED.name,segment=EXCLUDED.segment,website=EXCLUDED.website,whatsapp_link=EXCLUDED.whatsapp_link,updated_at=NOW()`,[req.user.id,c.name,c.segment,c.website,c.whatsappLink]);res.json({company:c})});
 app.get("/api/whatsapp-status",auth,requireAccess,async(req,res)=>{
- const c=(await pool.query(`SELECT whatsapp_phone_number_id,whatsapp_business_account_id,whatsapp_connected_at FROM companies WHERE user_id=$1`,[req.user.id])).rows[0]||{};
+ const c=(await pool.query(`SELECT whatsapp_phone_number_id,_id,whatsapp_connected_at FROM companies WHERE user_id=$1`,[req.user.id])).rows[0]||{};
  res.json({
    configured:!!WHATSAPP_ACCESS_TOKEN,
    tokenConfigured:!!WHATSAPP_ACCESS_TOKEN,
    phoneNumberId:c.whatsapp_phone_number_id||WHATSAPP_ENV_PHONE_NUMBER_ID||"",
-   businessAccountId:c.whatsapp_business_account_id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID||"",
+   businessAccountId:c._id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID||"",
    connected:!!c.whatsapp_phone_number_id,
    connectedAt:c.whatsapp_connected_at||null,
    lastEventAt:waDiag.lastEventAt,
@@ -581,9 +581,9 @@ app.get("/api/whatsapp-status",auth,requireAccess,async(req,res)=>{
 });
 app.get("/api/whatsapp-webhook-check",auth,requireAccess,async(req,res)=>{
   try{
-    const c=(await pool.query(`SELECT whatsapp_phone_number_id,whatsapp_business_account_id,whatsapp_connected_at FROM companies WHERE user_id=$1`,[req.user.id])).rows[0]||{};
+    const c=(await pool.query(`SELECT whatsapp_phone_number_id,_id,whatsapp_connected_at FROM companies WHERE user_id=$1`,[req.user.id])).rows[0]||{};
     const phoneNumberId=c.whatsapp_phone_number_id||WHATSAPP_ENV_PHONE_NUMBER_ID||"";
-    const businessAccountId=c.whatsapp_business_account_id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID||"";
+    const businessAccountId=c._id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID||"";
     const checks={
       accessToken:!!WHATSAPP_ACCESS_TOKEN,
       verifyToken:!!WHATSAPP_VERIFY_TOKEN,
@@ -607,7 +607,7 @@ app.put("/api/whatsapp-connection",auth,requireAccess,async(req,res)=>{
  if(!WHATSAPP_ACCESS_TOKEN)return res.status(503).json({error:"O WHATSAPP_ACCESS_TOKEN não está configurado no Render."});
  try{
    const meta=await validateAndSubscribeWhatsapp({phoneNumberId,businessAccountId});
-   await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link,whatsapp_load_history,whatsapp_phone_number_id,whatsapp_business_account_id,whatsapp_connected_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW()) ON CONFLICT(user_id) DO UPDATE SET whatsapp_phone_number_id=EXCLUDED.whatsapp_phone_number_id,whatsapp_business_account_id=EXCLUDED.whatsapp_business_account_id,whatsapp_connected_at=NOW(),updated_at=NOW()`,[req.user.id,"","","","",true,phoneNumberId,businessAccountId]);
+   await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link,whatsapp_load_history,whatsapp_phone_number_id,_id,whatsapp_connected_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW()) ON CONFLICT(user_id) DO UPDATE SET whatsapp_phone_number_id=EXCLUDED.whatsapp_phone_number_id,_id=EXCLUDED._id,whatsapp_connected_at=NOW(),updated_at=NOW()`,[req.user.id,"","","","",true,phoneNumberId,businessAccountId]);
    res.json({ok:true,phoneNumberId,businessAccountId,meta,webhookUrl:WHATSAPP_WEBHOOK_URL});
  }catch(e){
    console.error("[RADAR] Falha ao validar/conectar WhatsApp:",e.message,e?.meta?.error||"");
@@ -617,9 +617,9 @@ app.put("/api/whatsapp-connection",auth,requireAccess,async(req,res)=>{
 });
 app.post("/api/whatsapp-test",auth,requireAccess,async(req,res)=>{
  try{
-   const c=(await pool.query(`SELECT whatsapp_phone_number_id,whatsapp_business_account_id FROM companies WHERE user_id=$1`,[req.user.id])).rows[0]||{};
+   const c=(await pool.query(`SELECT whatsapp_phone_number_id,_id FROM companies WHERE user_id=$1`,[req.user.id])).rows[0]||{};
    const phoneNumberId=c.whatsapp_phone_number_id||WHATSAPP_ENV_PHONE_NUMBER_ID;
-   const businessAccountId=c.whatsapp_business_account_id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID;
+   const businessAccountId=c._id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID;
    if(!phoneNumberId)return res.status(400).json({ok:false,error:"Nenhum Phone Number ID cadastrado."});
    const meta=await validateAndSubscribeWhatsapp({phoneNumberId,businessAccountId});
    res.json({ok:true,webhookUrl:WHATSAPP_WEBHOOK_URL,meta,diagnostic:{lastEventAt:waDiag.lastEventAt,lastMessageAt:waDiag.lastMessageAt,unmatchedCount:waDiag.unmatchedCount}});
