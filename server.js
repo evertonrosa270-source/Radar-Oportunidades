@@ -429,6 +429,7 @@ app.post("/api/webhooks/mercadopago",async(req,res)=>{
  }catch(e){console.error("[RADAR] Webhook Mercado Pago:",e.message);}
 });
 
+app.get("/api/config",(req,res)=>{res.json({googleClientId:GOOGLE_CLIENT_ID||null})});
 app.get("/health",async(req,res)=>{try{await pool.query("SELECT 1");res.json({ok:true,database:"connected",environment:NODE_ENV})}catch{res.status(503).json({ok:false,database:"disconnected"})}});
 let googleKeysCache=null;
 let googleKeysExpiresAt=0;
