@@ -51,3 +51,14 @@ Depois de configurar a Cloud API e validar o webhook na Meta:
 5. Mensagens de texto recebidas pelo número vinculado passam pelo webhook e são gravadas no PostgreSQL para análise.
 
 O token da Cloud API não é exposto no frontend.
+
+
+## Diagnóstico automático
+
+Ao salvar o Phone Number ID + WABA ID, o RADAR agora consulta a Meta Graph API para validar o número e tenta inscrever o aplicativo no WABA (`subscribed_apps`). A tela também possui "Testar conexão com a Meta".
+
+Se o número informado for o telefone (ex.: 51993773172) em vez do **Phone Number ID** fornecido pela Meta, a conexão será rejeitada com uma mensagem clara.
+
+O webhook precisa estar configurado na Meta para o callback:
+`/api/webhook/whatsapp`
+e o campo de mensagens precisa estar inscrito para que novas mensagens sejam entregues ao RADAR.
