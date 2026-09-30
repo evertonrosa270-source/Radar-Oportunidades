@@ -101,7 +101,7 @@ async function whatsappGraphRequest(pathname,{method="GET",body=null}={}){
 async function validateAndSubscribeWhatsapp({phoneNumberId,businessAccountId}){
   const owned=await whatsappGraphRequest(`/${encodeURIComponent(phoneNumberId)}?fields=id,display_phone_number,verified_name,`);
   if(String(owned?.id||"")!==String(phoneNumberId)) throw new Error("A Meta retornou um Phone Number ID diferente do informado.");
-  const metaWaba=String(owned?.?.id||"");
+  const metaWaba=String(owned?.id||"");
   const resolvedWaba=String(businessAccountId||metaWaba||"");
   if(businessAccountId && metaWaba && metaWaba!==String(businessAccountId)) throw new Error("O Phone Number ID informado não pertence ao WhatsApp Business Account ID informado.");
   if(!resolvedWaba) throw new Error("A Meta não informou o WhatsApp Business Account ID deste número. Confirme o WABA ID e as permissões do token.");
