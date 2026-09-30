@@ -66,6 +66,9 @@ app.use(express.static(DIST_DIR, { index: false }));
 // Webhook oficial da Meta / WhatsApp Business Platform.
 // A Meta chama esta rota por GET para validar o endpoint e por POST para entregar eventos.
 const WHATSAPP_VERIFY_TOKEN=String(process.env.WHATSAPP_VERIFY_TOKEN||"").trim();
+const WHATSAPP_ACCESS_TOKEN=String(process.env.WHATSAPP_ACCESS_TOKEN||process.env.WHATSAPP_CLOUD_API_TOKEN||process.env.META_WHATSAPP_ACCESS_TOKEN||"").trim();
+const WHATSAPP_ENV_PHONE_NUMBER_ID=String(process.env.WHATSAPP_PHONE_NUMBER_ID||"").trim();
+const WHATSAPP_ENV_BUSINESS_ACCOUNT_ID=String(process.env.WHATSAPP_BUSINESS_ACCOUNT_ID||"").trim();
 app.get("/api/webhook/whatsapp",(req,res)=>{
   const mode=String(req.query["hub.mode"]||"");
   const token=String(req.query["hub.verify_token"]||"");
@@ -74,11 +77,53 @@ app.get("/api/webhook/whatsapp",(req,res)=>{
   if(mode==="subscribe" && token===WHATSAPP_VERIFY_TOKEN && challenge) return res.status(200).send(challenge);
   return res.sendStatus(403);
 });
-app.post("/api/webhook/whatsapp",(req,res)=>{
+app.post("/api/webhook/whatsapp",async(req,res)=>{
+  // A Meta espera uma resposta rápida. O processamento abaixo é curto e idempotente.
   try{
     const body=req.body||{};
     console.log("[RADAR] Webhook WhatsApp recebido:",JSON.stringify(body));
-    // Acknowledge imediatamente para a Meta; o processamento de mensagens será feito a seguir.
+    const entries=Array.isArray(body.entry)?body.entry:[];
+    let processed=0;
+    for(const entry of entries){
+      const changes=Array.isArray(entry?.changes)?entry.changes:[];
+      for(const change of changes){
+        const value=change?.value||{};
+        const phoneNumberId=String(value?.metadata?.phone_number_id||"").trim();
+        const businessAccountId=String(entry?.id||"").trim();
+        const messages=Array.isArray(value?.messages)?value.messages:[];
+        if(!messages.length) continue;
+        let companyRow=null;
+        if(phoneNumberId){
+          companyRow=(await pool.query(`SELECT user_id FROM companies WHERE whatsapp_phone_number_id=$1 LIMIT 1`,[phoneNumberId])).rows[0]||null;
+        }
+        if(!companyRow && WHATSAPP_ENV_PHONE_NUMBER_ID && phoneNumberId===WHATSAPP_ENV_PHONE_NUMBER_ID){
+          companyRow=(await pool.query(`SELECT user_id FROM companies WHERE whatsapp_phone_number_id=$1 LIMIT 1`,[WHATSAPP_ENV_PHONE_NUMBER_ID])).rows[0]||null;
+        }
+        if(!companyRow){
+          console.warn(`[RADAR] Mensagem WhatsApp recebida, mas nenhum usuário está vinculado ao phone_number_id ${phoneNumberId||"ausente"}.`);
+          continue;
+        }
+        const userId=companyRow.user_id;
+        const products=(await pool.query(`SELECT name,price::float AS price FROM products WHERE user_id=$1`,[userId])).rows;
+        for(const msg of messages){
+          if(String(msg?.type||"")!=="text" || !msg?.text?.body) continue;
+          const whatsappMessageId=String(msg.id||"").trim();
+          if(whatsappMessageId){
+            const duplicate=(await pool.query(`SELECT 1 FROM messages WHERE whatsapp_message_id=$1 LIMIT 1`,[whatsappMessageId])).rowCount;
+            if(duplicate) continue;
+          }
+          const customer=cleanText(value?.contacts?.find((c)=>String(c?.wa_id||"")===String(msg?.from||""))?.profile?.name||msg?.from||"Cliente WhatsApp",120);
+          const message=cleanText(msg.text.body,5000);
+          if(!message) continue;
+          const result=classify(message,products);
+          const itemId=id();
+          const createdAt=msg.timestamp?new Date(Number(msg.timestamp)*1000).toISOString():new Date().toISOString();
+          await pool.query(`INSERT INTO messages(id,user_id,customer,message,product,value,status,reason,confidence,created_at,whatsapp_message_id,whatsapp_from,whatsapp_phone_number_id,source) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'whatsapp')`,[itemId,userId,customer,message,result.product,result.value,result.status,result.reason,result.confidence,createdAt,whatsappMessageId||null,String(msg?.from||""),phoneNumberId||null]);
+          processed++;
+        }
+      }
+    }
+    if(processed) console.log(`[RADAR] ${processed} mensagem(ns) WhatsApp processada(s).`);
     return res.sendStatus(200);
   }catch(e){
     console.error("[RADAR] Erro no webhook WhatsApp:",e.message);
@@ -118,6 +163,9 @@ async function initDb(){
  );`);
 
  await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS whatsapp_load_history BOOLEAN NOT NULL DEFAULT TRUE;`);
+ await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS whatsapp_phone_number_id VARCHAR(40);`);
+ await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS whatsapp_business_account_id VARCHAR(40);`);
+ await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS whatsapp_connected_at TIMESTAMPTZ;`);
 
  await pool.query(`CREATE TABLE IF NOT EXISTS products (
    id UUID PRIMARY KEY,
@@ -138,8 +186,17 @@ async function initDb(){
    status VARCHAR(40) NOT NULL,
    reason TEXT NOT NULL DEFAULT '',
    confidence INTEGER,
-   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+   whatsapp_message_id VARCHAR(255),
+   whatsapp_from VARCHAR(40),
+   whatsapp_phone_number_id VARCHAR(40),
+   source VARCHAR(30) NOT NULL DEFAULT 'manual'
  );`);
+ await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS whatsapp_message_id VARCHAR(255);`);
+ await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS whatsapp_from VARCHAR(40);`);
+ await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS whatsapp_phone_number_id VARCHAR(40);`);
+ await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS source VARCHAR(30) NOT NULL DEFAULT 'manual';`);
+ await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_whatsapp_message_id ON messages(whatsapp_message_id) WHERE whatsapp_message_id IS NOT NULL;`);
 
  await pool.query(`CREATE TABLE IF NOT EXISTS plans (
    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -234,9 +291,9 @@ async function requireMessageCapacity(req,res,next){try{const e=req.entitlements
 async function requireProductCapacity(req,res,next){try{const e=req.entitlements||await getEntitlements(req.user.id);if(e.productsUsed>=e.productLimit)return res.status(429).json({error:`Seu plano permite até ${e.productLimit.toLocaleString('pt-BR')} produtos/serviços. Faça upgrade para cadastrar mais.`,code:"PRODUCT_LIMIT",limit:e.productLimit,used:e.productsUsed});req.entitlements=e;next()}catch(e){next(e)}}
 
 async function getPublicUser(userId){
- const q=await pool.query(`SELECT u.id,u.name,u.email,u.trial_started_at,u.trial_ends_at,c.name company_name,c.segment,c.website,c.whatsapp_link,c.whatsapp_load_history FROM users u LEFT JOIN companies c ON c.user_id=u.id WHERE u.id=$1`,[userId]);
+ const q=await pool.query(`SELECT u.id,u.name,u.email,u.trial_started_at,u.trial_ends_at,c.name company_name,c.segment,c.website,c.whatsapp_link,c.whatsapp_load_history,c.whatsapp_phone_number_id,c.whatsapp_business_account_id,c.whatsapp_connected_at FROM users u LEFT JOIN companies c ON c.user_id=u.id WHERE u.id=$1`,[userId]);
  const u=q.rows[0]; if(!u)return null; const access=await getEntitlements(userId);
- return {id:u.id,name:u.name,email:u.email,trialStartedAt:u.trial_started_at,trialEndsAt:u.trial_ends_at,access:{...access,canUse:access.canUse},company:{name:u.company_name||"",segment:u.segment||"",website:u.website||"",whatsappLink:u.whatsapp_link||"",whatsappLoadHistory:u.whatsapp_load_history!==false}}
+ return {id:u.id,name:u.name,email:u.email,trialStartedAt:u.trial_started_at,trialEndsAt:u.trial_ends_at,access:{...access,canUse:access.canUse},company:{name:u.company_name||"",segment:u.segment||"",website:u.website||"",whatsappLink:u.whatsapp_link||"",whatsappLoadHistory:u.whatsapp_load_history!==false,whatsappPhoneNumberId:u.whatsapp_phone_number_id||"",whatsappBusinessAccountId:u.whatsapp_business_account_id||"",whatsappConnectedAt:u.whatsapp_connected_at||null}}
 }
 
 function normalize(v){return String(v??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim()}
@@ -433,6 +490,17 @@ app.post("/api/auth/google",async(req,res)=>{
 app.post("/api/login",async(req,res)=>{const email=cleanText(req.body?.email,254).toLowerCase(),password=String(req.body?.password||"");const q=await pool.query("SELECT id,email,password_hash,google_sub,trial_ends_at FROM users WHERE email=$1",[email]);const u=q.rows[0];if(!u)return res.status(401).json({error:"E-mail ou senha incorretos."});if(!u.password_hash)return res.status(401).json({error:"Esta conta foi criada com Google. Use o botão Continuar com Google."});if(!(await bcrypt.compare(password,u.password_hash)))return res.status(401).json({error:"E-mail ou senha incorretos."});if(!u.trial_ends_at)await pool.query("UPDATE users SET trial_started_at=COALESCE(trial_started_at,NOW()),trial_ends_at=NOW()+INTERVAL '1 day' WHERE id=$1",[u.id]);const user=await getPublicUser(u.id);const token=jwt.sign({id:user.id,email:user.email},SECRET,{algorithm:"HS256",expiresIn:"8h"});res.json({token,user})});
 app.get("/api/me",auth,async(req,res)=>{const u=await getPublicUser(req.user.id);if(!u)return res.status(404).json({error:"Usuário não encontrado."});res.json({user:u})});
 app.put("/api/company",auth,requireAccess,async(req,res)=>{const c={name:cleanText(req.body?.name,120),segment:cleanText(req.body?.segment,80),website:cleanText(req.body?.website,300),whatsappLink:cleanText(req.body?.whatsappLink,300)};if(!validUrl(c.website)||!validUrl(c.whatsappLink))return res.status(400).json({error:"Links devem começar com http:// ou https://"});await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link) VALUES($1,$2,$3,$4,$5) ON CONFLICT(user_id) DO UPDATE SET name=EXCLUDED.name,segment=EXCLUDED.segment,website=EXCLUDED.website,whatsapp_link=EXCLUDED.whatsapp_link,updated_at=NOW()`,[req.user.id,c.name,c.segment,c.website,c.whatsappLink]);res.json({company:c})});
+app.get("/api/whatsapp-status",auth,requireAccess,async(req,res)=>{
+ const c=(await pool.query(`SELECT whatsapp_phone_number_id,whatsapp_business_account_id,whatsapp_connected_at FROM companies WHERE user_id=$1`,[req.user.id])).rows[0]||{};
+ res.json({configured:!!WHATSAPP_ACCESS_TOKEN,tokenConfigured:!!WHATSAPP_ACCESS_TOKEN,phoneNumberId:c.whatsapp_phone_number_id||WHATSAPP_ENV_PHONE_NUMBER_ID||"",businessAccountId:c.whatsapp_business_account_id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID||"",connected:!!c.whatsapp_phone_number_id,connectedAt:c.whatsapp_connected_at||null});
+});
+app.put("/api/whatsapp-connection",auth,requireAccess,async(req,res)=>{
+ const phoneNumberId=cleanText(req.body?.phoneNumberId,40);
+ const businessAccountId=cleanText(req.body?.businessAccountId,40);
+ if(!phoneNumberId)return res.status(400).json({error:"Informe o Phone Number ID do WhatsApp Business."});
+ await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link,whatsapp_load_history,whatsapp_phone_number_id,whatsapp_business_account_id,whatsapp_connected_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW()) ON CONFLICT(user_id) DO UPDATE SET whatsapp_phone_number_id=EXCLUDED.whatsapp_phone_number_id,whatsapp_business_account_id=EXCLUDED.whatsapp_business_account_id,whatsapp_connected_at=NOW(),updated_at=NOW()`,[req.user.id,"","","","",true,phoneNumberId,businessAccountId]);
+ res.json({ok:true,phoneNumberId,businessAccountId});
+});
 app.put("/api/whatsapp-settings",auth,requireAccess,async(req,res)=>{const loadHistory=req.body?.loadHistory!==false;await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link,whatsapp_load_history) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(user_id) DO UPDATE SET whatsapp_load_history=EXCLUDED.whatsapp_load_history,updated_at=NOW()`,[req.user.id,"","","","",loadHistory]);res.json({whatsappLoadHistory:loadHistory})});
 app.get("/api/products",auth,requireAccess,async(req,res)=>res.json((await pool.query("SELECT id,name,description,price::float AS price FROM products WHERE user_id=$1 ORDER BY created_at DESC",[req.user.id])).rows));
 app.post("/api/products",auth,requireAccess,requireProductCapacity,async(req,res)=>{const name=cleanText(req.body?.name,120),description=cleanText(req.body?.description,500),price=Number(String(req.body?.price??"").replace(/[^\d,.-]/g,"").replace(/\.(?=.*\.)/g,"").replace(",","."));if(!name||!Number.isFinite(price)||price<=0||price>1e9)return res.status(400).json({error:"Informe nome e preço válido."});const p={id:id(),name,description,price};await pool.query("INSERT INTO products(id,user_id,name,description,price) VALUES($1,$2,$3,$4,$5)",[p.id,req.user.id,p.name,p.description,p.price]);res.status(201).json(p)});

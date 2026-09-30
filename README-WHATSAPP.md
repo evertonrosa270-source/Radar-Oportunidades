@@ -38,3 +38,16 @@ Callback URL:
 O backend responde ao desafio `hub.challenge` quando `hub.verify_token` coincide com `WHATSAPP_VERIFY_TOKEN`.
 
 No Render, configure `WHATSAPP_VERIFY_TOKEN` com o mesmo valor usado no Meta.
+
+
+## Ativação dentro do RADAR
+
+Depois de configurar a Cloud API e validar o webhook na Meta:
+
+1. No Render, mantenha `WHATSAPP_ACCESS_TOKEN` configurado no backend.
+2. Entre no RADAR e abra **WhatsApp Business**.
+3. Informe o **Phone Number ID** e o **WhatsApp Business Account ID**.
+4. Clique em **Ativar WhatsApp Business**.
+5. Mensagens de texto recebidas pelo número vinculado passam pelo webhook e são gravadas no PostgreSQL para análise.
+
+O token da Cloud API não é exposto no frontend.
