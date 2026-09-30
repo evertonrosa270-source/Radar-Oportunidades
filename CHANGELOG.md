@@ -13,3 +13,9 @@ As etapas a seguir foram usadas para gerar este projeto:
 - Crie `eslint.config.js` para habilitar a linting.
 - Adicionar projeto à solução.
 - Grave este arquivo.
+
+## V15.1
+- Phone Number ID agora é validado (somente dígitos). O telefone digitado no campo impedia o vínculo das mensagens.
+- Diagnóstico da integração na aba WhatsApp Business.
+- Verificação opcional da assinatura do webhook (WHATSAPP_APP_SECRET).
+- Nova página de apresentação na tela de login.

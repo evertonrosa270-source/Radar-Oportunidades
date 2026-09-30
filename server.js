@@ -57,7 +57,7 @@ const app=express(); app.disable("x-powered-by"); if(NODE_ENV==="production") ap
 const DIST_DIR=path.join(process.cwd(),"dist");
 const DIST_INDEX=path.join(DIST_DIR,"index.html");
 app.use(helmet({contentSecurityPolicy:false,crossOriginResourcePolicy:{policy:"cross-origin"}}));
-app.use(express.json({limit:"200kb"}));
+app.use(express.json({limit:"200kb",verify:(req,_res,buf)=>{req.rawBody=buf}}));
 const apiCors=cors({origin(origin,cb){if(!origin||allowedOrigins.includes(origin))return cb(null,true);return cb(Object.assign(new Error("Origem não permitida."),{status:403}));},methods:["GET","POST","PUT","DELETE"],allowedHeaders:["Content-Type","Authorization"]});
 const apiLimiter=rateLimit({windowMs:15*60*1000,max:300,standardHeaders:true,legacyHeaders:false,message:{error:"Muitas requisições. Tente novamente mais tarde."}});
 const authLimiter=rateLimit({windowMs:15*60*1000,max:8,standardHeaders:true,legacyHeaders:false,skipSuccessfulRequests:true,message:{error:"Muitas tentativas. Aguarde alguns minutos."}});
@@ -69,6 +69,9 @@ const WHATSAPP_VERIFY_TOKEN=String(process.env.WHATSAPP_VERIFY_TOKEN||"").trim()
 const WHATSAPP_ACCESS_TOKEN=String(process.env.WHATSAPP_ACCESS_TOKEN||process.env.WHATSAPP_CLOUD_API_TOKEN||process.env.META_WHATSAPP_ACCESS_TOKEN||"").trim();
 const WHATSAPP_ENV_PHONE_NUMBER_ID=String(process.env.WHATSAPP_PHONE_NUMBER_ID||"").trim();
 const WHATSAPP_ENV_BUSINESS_ACCOUNT_ID=String(process.env.WHATSAPP_BUSINESS_ACCOUNT_ID||"").trim();
+const WHATSAPP_APP_SECRET=String(process.env.WHATSAPP_APP_SECRET||process.env.META_APP_SECRET||"").trim();
+const waDiag={lastEventAt:null,lastMessageAt:null,unmatchedCount:0,lastUnmatchedAt:null};
+function validWhatsappSignature(req){if(!WHATSAPP_APP_SECRET)return true;const sig=String(req.get("x-hub-signature-256")||"");const exp="sha256="+crypto.createHmac("sha256",WHATSAPP_APP_SECRET).update(req.rawBody||Buffer.alloc(0)).digest("hex");const a=Buffer.from(sig),b=Buffer.from(exp);return a.length===b.length&&crypto.timingSafeEqual(a,b)}
 app.get("/api/webhook/whatsapp",(req,res)=>{
   const mode=String(req.query["hub.mode"]||"");
   const token=String(req.query["hub.verify_token"]||"");
@@ -80,7 +83,9 @@ app.get("/api/webhook/whatsapp",(req,res)=>{
 app.post("/api/webhook/whatsapp",async(req,res)=>{
   // A Meta espera uma resposta rápida. O processamento abaixo é curto e idempotente.
   try{
+    if(!validWhatsappSignature(req)){console.warn("[RADAR] Webhook WhatsApp rejeitado: assinatura inválida.");return res.sendStatus(401);}
     const body=req.body||{};
+    waDiag.lastEventAt=new Date().toISOString();
     console.log("[RADAR] Webhook WhatsApp recebido:",JSON.stringify(body));
     const entries=Array.isArray(body.entry)?body.entry:[];
     let processed=0;
@@ -100,6 +105,7 @@ app.post("/api/webhook/whatsapp",async(req,res)=>{
           companyRow=(await pool.query(`SELECT user_id FROM companies WHERE whatsapp_phone_number_id=$1 LIMIT 1`,[WHATSAPP_ENV_PHONE_NUMBER_ID])).rows[0]||null;
         }
         if(!companyRow){
+          waDiag.unmatchedCount++;waDiag.lastUnmatchedAt=new Date().toISOString();
           console.warn(`[RADAR] Mensagem WhatsApp recebida, mas nenhum usuário está vinculado ao phone_number_id ${phoneNumberId||"ausente"}.`);
           continue;
         }
@@ -119,7 +125,7 @@ app.post("/api/webhook/whatsapp",async(req,res)=>{
           const itemId=id();
           const createdAt=msg.timestamp?new Date(Number(msg.timestamp)*1000).toISOString():new Date().toISOString();
           await pool.query(`INSERT INTO messages(id,user_id,customer,message,product,value,status,reason,confidence,created_at,whatsapp_message_id,whatsapp_from,whatsapp_phone_number_id,source) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'whatsapp')`,[itemId,userId,customer,message,result.product,result.value,result.status,result.reason,result.confidence,createdAt,whatsappMessageId||null,String(msg?.from||""),phoneNumberId||null]);
-          processed++;
+          processed++;waDiag.lastMessageAt=new Date().toISOString();
         }
       }
     }
@@ -492,12 +498,14 @@ app.get("/api/me",auth,async(req,res)=>{const u=await getPublicUser(req.user.id)
 app.put("/api/company",auth,requireAccess,async(req,res)=>{const c={name:cleanText(req.body?.name,120),segment:cleanText(req.body?.segment,80),website:cleanText(req.body?.website,300),whatsappLink:cleanText(req.body?.whatsappLink,300)};if(!validUrl(c.website)||!validUrl(c.whatsappLink))return res.status(400).json({error:"Links devem começar com http:// ou https://"});await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link) VALUES($1,$2,$3,$4,$5) ON CONFLICT(user_id) DO UPDATE SET name=EXCLUDED.name,segment=EXCLUDED.segment,website=EXCLUDED.website,whatsapp_link=EXCLUDED.whatsapp_link,updated_at=NOW()`,[req.user.id,c.name,c.segment,c.website,c.whatsappLink]);res.json({company:c})});
 app.get("/api/whatsapp-status",auth,requireAccess,async(req,res)=>{
  const c=(await pool.query(`SELECT whatsapp_phone_number_id,whatsapp_business_account_id,whatsapp_connected_at FROM companies WHERE user_id=$1`,[req.user.id])).rows[0]||{};
- res.json({configured:!!WHATSAPP_ACCESS_TOKEN,tokenConfigured:!!WHATSAPP_ACCESS_TOKEN,phoneNumberId:c.whatsapp_phone_number_id||WHATSAPP_ENV_PHONE_NUMBER_ID||"",businessAccountId:c.whatsapp_business_account_id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID||"",connected:!!c.whatsapp_phone_number_id,connectedAt:c.whatsapp_connected_at||null});
+ res.json({configured:!!WHATSAPP_ACCESS_TOKEN,tokenConfigured:!!WHATSAPP_ACCESS_TOKEN,phoneNumberId:c.whatsapp_phone_number_id||WHATSAPP_ENV_PHONE_NUMBER_ID||"",businessAccountId:c.whatsapp_business_account_id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID||"",connected:!!c.whatsapp_phone_number_id,connectedAt:c.whatsapp_connected_at||null,lastEventAt:waDiag.lastEventAt,lastMessageAt:waDiag.lastMessageAt,unmatchedCount:waDiag.unmatchedCount,lastUnmatchedAt:waDiag.lastUnmatchedAt,signatureChecked:!!WHATSAPP_APP_SECRET});
 });
 app.put("/api/whatsapp-connection",auth,requireAccess,async(req,res)=>{
  const phoneNumberId=cleanText(req.body?.phoneNumberId,40);
  const businessAccountId=cleanText(req.body?.businessAccountId,40);
  if(!phoneNumberId)return res.status(400).json({error:"Informe o Phone Number ID do WhatsApp Business."});
+ if(!/^\d{8,20}$/.test(phoneNumberId))return res.status(400).json({error:"O Phone Number ID é o identificador numérico da Meta (somente dígitos, ex.: 1243057418900394), não o número de telefone. Ele aparece em Meta for Developers > WhatsApp > Configuração da API."});
+ if(businessAccountId&&!/^\d{8,20}$/.test(businessAccountId))return res.status(400).json({error:"O WhatsApp Business Account ID deve conter somente dígitos."});
  await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link,whatsapp_load_history,whatsapp_phone_number_id,whatsapp_business_account_id,whatsapp_connected_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW()) ON CONFLICT(user_id) DO UPDATE SET whatsapp_phone_number_id=EXCLUDED.whatsapp_phone_number_id,whatsapp_business_account_id=EXCLUDED.whatsapp_business_account_id,whatsapp_connected_at=NOW(),updated_at=NOW()`,[req.user.id,"","","","",true,phoneNumberId,businessAccountId]);
  res.json({ok:true,phoneNumberId,businessAccountId});
 });
