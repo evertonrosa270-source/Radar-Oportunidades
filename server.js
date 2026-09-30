@@ -171,6 +171,13 @@ async function initDb(){
  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_unique ON users(google_sub) WHERE google_sub IS NOT NULL;`);
  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_started_at TIMESTAMPTZ;`);
  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ;`);
+ await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_policy_version INTEGER NOT NULL DEFAULT 0;`);
+ // Migração única: usuários que ainda estavam no trial de 1 dia recebem os 2 dias adicionais.
+ // A versão impede que cada reinício do servidor estenda o trial novamente.
+ await pool.query(`UPDATE users
+   SET trial_ends_at = trial_ends_at + INTERVAL '2 days', trial_policy_version = 2
+   WHERE trial_policy_version < 2 AND trial_ends_at IS NOT NULL AND trial_ends_at > NOW();`);
+ await pool.query(`UPDATE users SET trial_policy_version = 2 WHERE trial_policy_version < 2 AND (trial_ends_at IS NULL OR trial_ends_at <= NOW());`);
 
  await pool.query(`CREATE TABLE IF NOT EXISTS companies (
    user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -291,6 +298,7 @@ function validUrl(v){if(!v)return true;try{const u=new URL(v);return ["http:","h
 function id(){return crypto.randomUUID()}
 function auth(req,res,next){const h=req.headers.authorization||"";if(!h.startsWith("Bearer "))return res.status(401).json({error:"Sessão inválida."});try{req.user=jwt.verify(h.slice(7),SECRET,{algorithms:["HS256"]});next()}catch{return res.status(401).json({error:"Sessão inválida ou expirada."})}}
 const PLAN_RULES={
+ FREE_TRIAL:{label:"Free Trial",messageLimit:200,productLimit:20,historyDays:7,teamLimit:1,aiLevel:"Básica",aiReply:false,reports:"Básicos"},
  RADAR_START:{label:"Radar Start",messageLimit:500,productLimit:20,historyDays:7,teamLimit:1,aiLevel:"Básica",aiReply:false,reports:"Básicos"},
  RADAR_PRO:{label:"Radar Pro",messageLimit:5000,productLimit:200,historyDays:90,teamLimit:3,aiLevel:"Avançada",aiReply:true,reports:"Completos"},
  RADAR_BUSINESS:{label:"Radar Business",messageLimit:20000,productLimit:1000,historyDays:365,teamLimit:10,aiLevel:"Avançada + prioridade",aiReply:true,reports:"Avançados"}
@@ -301,10 +309,10 @@ async function getEntitlements(userId){
  const isAdmin=!!ADMIN_EMAIL && String(u?.email||"").toLowerCase()===ADMIN_EMAIL;
  const trialEnds=u?.trial_ends_at?new Date(u.trial_ends_at):null; const trialActive=!!trialEnds&&trialEnds>new Date();
  const sub=(await pool.query(`SELECT s.id,s.status,p.code,p.name,p.price::float AS price FROM subscriptions s JOIN plans p ON p.id=s.plan_id WHERE s.user_id=$1 AND LOWER(s.status) IN ('authorized','active') ORDER BY s.created_at DESC LIMIT 1`,[userId])).rows[0];
- const paidActive=!!sub; const planCode=isAdmin?"RADAR_BUSINESS":(paidActive?sub.code:(trialActive?"RADAR_PRO":null)); const rule=ruleFor(planCode);
+ const paidActive=!!sub; const planCode=isAdmin?"RADAR_BUSINESS":(paidActive?sub.code:(trialActive?"FREE_TRIAL":null)); const rule=ruleFor(planCode);
  const usage=(await pool.query(`SELECT COUNT(*)::int AS count FROM messages WHERE user_id=$1 AND created_at>=date_trunc('month',NOW())`,[userId])).rows[0];
  const productCount=(await pool.query(`SELECT COUNT(*)::int AS count FROM products WHERE user_id=$1`,[userId])).rows[0];
- return {isAdmin,trialActive:!isAdmin&&trialActive,trialEndsAt:u?.trial_ends_at||null,paidActive:isAdmin||paidActive,subscriptionStatus:isAdmin?"admin":(sub?.status||null),planCode,planName:isAdmin?"Administrador · Radar Business":(sub?.name||(trialActive?"Free Trial · Radar Pro":"Nenhum")),messageLimit:rule.messageLimit,productLimit:rule.productLimit,historyDays:rule.historyDays,teamLimit:rule.teamLimit,aiLevel:rule.aiLevel,aiReply:rule.aiReply,reports:rule.reports,messagesUsed:usage.count,productsUsed:productCount.count,canUse:isAdmin||trialActive||paidActive};
+ return {isAdmin,trialActive:!isAdmin&&trialActive,trialEndsAt:u?.trial_ends_at||null,paidActive:isAdmin||paidActive,subscriptionStatus:isAdmin?"admin":(sub?.status||null),planCode,planName:isAdmin?"Administrador · Radar Business":(sub?.name||(trialActive?"Free Trial":"Nenhum")),messageLimit:rule.messageLimit,productLimit:rule.productLimit,historyDays:rule.historyDays,teamLimit:rule.teamLimit,aiLevel:rule.aiLevel,aiReply:rule.aiReply,reports:rule.reports,messagesUsed:usage.count,productsUsed:productCount.count,canUse:isAdmin||trialActive||paidActive};
 }
 async function requireAccess(req,res,next){try{const e=await getEntitlements(req.user.id);if(!e.canUse)return res.status(402).json({error:"Seu período de teste terminou. Escolha um plano para continuar.",code:"SUBSCRIPTION_REQUIRED"});req.entitlements=e;next()}catch(e){next(e)}}
 async function requireMessageCapacity(req,res,next){try{const e=req.entitlements||await getEntitlements(req.user.id);if(e.messagesUsed>=e.messageLimit)return res.status(429).json({error:`Você atingiu o limite de ${e.messageLimit.toLocaleString('pt-BR')} mensagens analisadas neste mês. Faça upgrade do plano para continuar.`,code:"MESSAGE_LIMIT",limit:e.messageLimit,used:e.messagesUsed});req.entitlements=e;next()}catch(e){next(e)}}
@@ -479,7 +487,7 @@ async function verifyGoogleIdToken(idToken){
  if(!Number.isFinite(Number(payload.exp))||Number(payload.exp)<=now)throw Object.assign(new Error("A credencial do Google expirou."),{status:401});
  return payload;
 }
-app.post("/api/register",async(req,res)=>{const name=cleanText(req.body?.name,120),email=cleanText(req.body?.email,254).toLowerCase(),password=String(req.body?.password||"");if(name.length<2||!validEmail(email)||password.length<8)return res.status(400).json({error:"Informe nome válido, e-mail válido e senha com pelo menos 8 caracteres."});const userId=id();const client=await pool.connect();try{const hash=await bcrypt.hash(password,12);await client.query("BEGIN");await client.query("INSERT INTO users(id,name,email,password_hash,trial_started_at,trial_ends_at) VALUES($1,$2,$3,$4,NOW(),NOW()+INTERVAL '1 day')",[userId,name,email,hash]);await client.query("INSERT INTO companies(user_id) VALUES($1)",[userId]);await client.query("COMMIT")}catch(e){await client.query("ROLLBACK").catch(()=>{});if(e.code==="23505")return res.status(409).json({error:"Este e-mail já possui uma conta."});throw e}finally{client.release()}const user=await getPublicUser(userId);const token=jwt.sign({id:user.id,email:user.email},SECRET,{algorithm:"HS256",expiresIn:"8h"});res.status(201).json({token,user})});
+app.post("/api/register",async(req,res)=>{const name=cleanText(req.body?.name,120),email=cleanText(req.body?.email,254).toLowerCase(),password=String(req.body?.password||"");if(name.length<2||!validEmail(email)||password.length<8)return res.status(400).json({error:"Informe nome válido, e-mail válido e senha com pelo menos 8 caracteres."});const userId=id();const client=await pool.connect();try{const hash=await bcrypt.hash(password,12);await client.query("BEGIN");await client.query("INSERT INTO users(id,name,email,password_hash,trial_started_at,trial_ends_at,trial_policy_version) VALUES($1,$2,$3,$4,NOW(),NOW()+INTERVAL '3 days',2)",[userId,name,email,hash]);await client.query("INSERT INTO companies(user_id) VALUES($1)",[userId]);await client.query("COMMIT")}catch(e){await client.query("ROLLBACK").catch(()=>{});if(e.code==="23505")return res.status(409).json({error:"Este e-mail já possui uma conta."});throw e}finally{client.release()}const user=await getPublicUser(userId);const token=jwt.sign({id:user.id,email:user.email},SECRET,{algorithm:"HS256",expiresIn:"8h"});res.status(201).json({token,user})});
 app.post("/api/auth/google",async(req,res)=>{
  try{
   const payload=await verifyGoogleIdToken(req.body?.credential);
@@ -497,7 +505,7 @@ app.post("/api/auth/google",async(req,res)=>{
     userId=existingByEmail.id;
    }else{
     userId=id();
-    await pool.query("INSERT INTO users(id,name,email,password_hash,google_sub,trial_started_at,trial_ends_at) VALUES($1,$2,$3,NULL,$4,NOW(),NOW()+INTERVAL '1 day')",[userId,name,email,googleSub]);
+    await pool.query("INSERT INTO users(id,name,email,password_hash,google_sub,trial_started_at,trial_ends_at,trial_policy_version) VALUES($1,$2,$3,NULL,$4,NOW(),NOW()+INTERVAL '3 days',2)",[userId,name,email,googleSub]);
     await pool.query("INSERT INTO companies(user_id) VALUES($1)",[userId]);
    }
   }
@@ -507,7 +515,7 @@ app.post("/api/auth/google",async(req,res)=>{
   res.json({token,user});
  }catch(e){res.status(e.status&&e.status<500?e.status:502).json({error:e.message||"Não foi possível entrar com Google."});}
 });
-app.post("/api/login",async(req,res)=>{const email=cleanText(req.body?.email,254).toLowerCase(),password=String(req.body?.password||"");const q=await pool.query("SELECT id,email,password_hash,google_sub,trial_ends_at FROM users WHERE email=$1",[email]);const u=q.rows[0];if(!u)return res.status(401).json({error:"E-mail ou senha incorretos."});if(!u.password_hash)return res.status(401).json({error:"Esta conta foi criada com Google. Use o botão Continuar com Google."});if(!(await bcrypt.compare(password,u.password_hash)))return res.status(401).json({error:"E-mail ou senha incorretos."});if(!u.trial_ends_at)await pool.query("UPDATE users SET trial_started_at=COALESCE(trial_started_at,NOW()),trial_ends_at=NOW()+INTERVAL '1 day' WHERE id=$1",[u.id]);const user=await getPublicUser(u.id);const token=jwt.sign({id:user.id,email:user.email},SECRET,{algorithm:"HS256",expiresIn:"8h"});res.json({token,user})});
+app.post("/api/login",async(req,res)=>{const email=cleanText(req.body?.email,254).toLowerCase(),password=String(req.body?.password||"");const q=await pool.query("SELECT id,email,password_hash,google_sub,trial_ends_at FROM users WHERE email=$1",[email]);const u=q.rows[0];if(!u)return res.status(401).json({error:"E-mail ou senha incorretos."});if(!u.password_hash)return res.status(401).json({error:"Esta conta foi criada com Google. Use o botão Continuar com Google."});if(!(await bcrypt.compare(password,u.password_hash)))return res.status(401).json({error:"E-mail ou senha incorretos."});if(!u.trial_ends_at)await pool.query("UPDATE users SET trial_started_at=COALESCE(trial_started_at,NOW()),trial_ends_at=NOW()+INTERVAL '3 days',trial_policy_version=2 WHERE id=$1",[u.id]);const user=await getPublicUser(u.id);const token=jwt.sign({id:user.id,email:user.email},SECRET,{algorithm:"HS256",expiresIn:"8h"});res.json({token,user})});
 app.get("/api/me",auth,async(req,res)=>{const u=await getPublicUser(req.user.id);if(!u)return res.status(404).json({error:"Usuário não encontrado."});res.json({user:u})});
 app.put("/api/company",auth,requireAccess,async(req,res)=>{const c={name:cleanText(req.body?.name,120),segment:cleanText(req.body?.segment,80),website:cleanText(req.body?.website,300),whatsappLink:cleanText(req.body?.whatsappLink,300)};if(!validUrl(c.website)||!validUrl(c.whatsappLink))return res.status(400).json({error:"Links devem começar com http:// ou https://"});await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link) VALUES($1,$2,$3,$4,$5) ON CONFLICT(user_id) DO UPDATE SET name=EXCLUDED.name,segment=EXCLUDED.segment,website=EXCLUDED.website,whatsapp_link=EXCLUDED.whatsapp_link,updated_at=NOW()`,[req.user.id,c.name,c.segment,c.website,c.whatsappLink]);res.json({company:c})});
 app.get("/api/whatsapp-status",auth,requireAccess,async(req,res)=>{
