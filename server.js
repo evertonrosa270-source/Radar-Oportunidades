@@ -99,7 +99,7 @@ async function whatsappGraphRequest(pathname,{method="GET",body=null}={}){
 }
 
 async function validateAndSubscribeWhatsapp({phoneNumberId,businessAccountId}){
-  const owned=await whatsappGraphRequest(`/${encodeURIComponent(phoneNumberId)}?fields=id,display_phone_number,verified_name,`);
+  const owned=await whatsappGraphRequest(`/${encodeURIComponent(phoneNumberId)}?fields=id,display_phone_number,verified_name`);
   if(String(owned?.id||"")!==String(phoneNumberId)) throw new Error("A Meta retornou um Phone Number ID diferente do informado.");
   const metaWaba=String(owned?.id||"");
   const resolvedWaba=String(businessAccountId||metaWaba||"");
