@@ -63,6 +63,7 @@ const apiLimiter=rateLimit({windowMs:15*60*1000,max:300,standardHeaders:true,leg
 const authLimiter=rateLimit({windowMs:15*60*1000,max:8,standardHeaders:true,legacyHeaders:false,skipSuccessfulRequests:true,message:{error:"Muitas tentativas. Aguarde alguns minutos."}});
 app.use(express.static(DIST_DIR, { index: false }));
 
+
 // Webhook oficial da Meta / WhatsApp Business Platform.
 // A Meta chama esta rota por GET para validar o endpoint e por POST para entregar eventos.
 const WHATSAPP_VERIFY_TOKEN=String(process.env.WHATSAPP_VERIFY_TOKEN||"").trim();
@@ -136,7 +137,13 @@ app.post("/api/webhook/whatsapp",async(req,res)=>{
     return res.sendStatus(200);
   }
 });
-app.use("/api",apiCors,apiLimiter); app.use("/api/login",authLimiter); app.use("/api/register",authLimiter); app.use("/api/auth/google",authLimiter);
+app.use("/api",apiCors,apiLimiter);
+// Configuração pública do frontend. O Client ID OAuth do Google não é segredo,
+// mas deve ser obtido pelo frontend em runtime para funcionar tanto no Render
+// quanto no Vercel sem depender exclusivamente de VITE_* durante o build.
+app.get("/api/config", (_req,res)=>{
+  res.json({ googleClientId: GOOGLE_CLIENT_ID || null });
+}); app.use("/api/login",authLimiter); app.use("/api/register",authLimiter); app.use("/api/auth/google",authLimiter);
 
 async function initDb(){
  // Ordem: tabelas-pai primeiro, para que as chaves estrangeiras funcionem
@@ -429,7 +436,6 @@ app.post("/api/webhooks/mercadopago",async(req,res)=>{
  }catch(e){console.error("[RADAR] Webhook Mercado Pago:",e.message);}
 });
 
-app.get("/api/config",(req,res)=>{res.json({googleClientId:GOOGLE_CLIENT_ID||null})});
 app.get("/health",async(req,res)=>{try{await pool.query("SELECT 1");res.json({ok:true,database:"connected",environment:NODE_ENV})}catch{res.status(503).json({ok:false,database:"disconnected"})}});
 let googleKeysCache=null;
 let googleKeysExpiresAt=0;

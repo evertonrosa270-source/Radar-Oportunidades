@@ -52,3 +52,11 @@ Não coloque Client Secret no frontend. O RADAR usa somente o Client ID no naveg
 - Conta RADAR existente com Gmail: o login Google pode ser vinculado à conta existente.
 - Conta existente com outro domínio de e-mail: o RADAR exige o login por senha antes de permitir vinculação automática.
 - Conta criada somente com Google: tentar entrar pela senha informa para usar o botão Google.
+
+## 7. Correção de deploy do botão
+
+O frontend também consegue obter o `GOOGLE_CLIENT_ID` público do backend em `/api/config`.
+Isso evita que o botão desapareça apenas porque `VITE_GOOGLE_CLIENT_ID` não foi injetado no build do Vercel.
+
+A variável `GOOGLE_CLIENT_ID` continua obrigatória no Render, porque o backend usa o mesmo Client ID para validar o ID Token recebido do Google.
+
