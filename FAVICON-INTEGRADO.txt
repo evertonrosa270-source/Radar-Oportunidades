@@ -1,0 +1,2 @@
+Favicon do RADAR OPORTUNIDADES integrado na V1.5.
+Arquivos adicionados em public/ e referências inseridas no index.html.
