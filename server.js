@@ -99,58 +99,50 @@ async function whatsappGraphRequest(pathname,{method="GET",body=null}={}){
 }
 
 async function validateAndSubscribeWhatsapp({phoneNumberId,businessAccountId}){
-  // Phone Number ID e WABA ID são objetos diferentes na Graph API.
-  // Primeiro validamos o número e depois confirmamos que ele pertence ao WABA informado.
-  const suppliedPhone=String(phoneNumberId||WHATSAPP_ENV_PHONE_NUMBER_ID||"").trim();
-  const suppliedWaba=String(businessAccountId||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID||"").trim();
-  if(!/^\d{8,20}$/.test(suppliedPhone)) throw new Error("Phone Number ID inválido.");
-  if(suppliedWaba && !/^\d{8,20}$/.test(suppliedWaba)) throw new Error("WhatsApp Business Account ID inválido.");
+  const normalizedPhoneNumberId=String(phoneNumberId||"").trim();
+  const normalizedWabaId=String(businessAccountId||"").trim();
 
-  let resolvedPhone=suppliedPhone;
-  let resolvedWaba=suppliedWaba;
-  let phone=null;
+  if(!normalizedPhoneNumberId) throw new Error("Informe o Phone Number ID do WhatsApp Business.");
+  if(!normalizedWabaId) throw new Error("Informe o WhatsApp Business Account ID (WABA ID).");
 
-  // Também aceita os dois campos invertidos e corrige a ordem automaticamente.
-  try{
-    phone=await whatsappGraphRequest(`/${encodeURIComponent(suppliedPhone)}?fields=id,display_phone_number,verified_name`);
-  }catch(firstError){
-    if(!suppliedWaba) throw firstError;
-    phone=await whatsappGraphRequest(`/${encodeURIComponent(suppliedWaba)}?fields=id,display_phone_number,verified_name`);
-    resolvedPhone=suppliedWaba;
-    resolvedWaba=suppliedPhone;
+  // 1) Valida o Phone Number ID como objeto de telefone.
+  // IMPORTANTE: o ID retornado aqui é o próprio Phone Number ID.
+  // Ele NÃO é o WABA ID. A versão anterior do RADAR comparava esses
+  // dois IDs entre si e gerava falsamente o erro "não pertence ao WABA".
+  const owned=await whatsappGraphRequest(
+    `/${encodeURIComponent(normalizedPhoneNumberId)}?fields=id,display_phone_number,verified_name`
+  );
+  if(String(owned?.id||"")!==normalizedPhoneNumberId){
+    throw new Error("A Meta retornou um Phone Number ID diferente do informado.");
   }
 
-  if(!phone?.display_phone_number){
-    if(!suppliedWaba) throw new Error("O ID informado no campo Phone Number ID não corresponde a um número do WhatsApp.");
-    const other=await whatsappGraphRequest(`/${encodeURIComponent(suppliedWaba)}?fields=id,display_phone_number,verified_name`);
-    if(other?.display_phone_number){
-      resolvedPhone=suppliedWaba;
-      resolvedWaba=suppliedPhone;
-      phone=other;
-    }else{
-      throw new Error("Nenhum dos IDs informados corresponde a um Phone Number ID válido.");
-    }
+  // 2) Confirma que o telefone realmente pertence ao WABA informado.
+  // A relação correta é consultada pela coleção /WABA_ID/phone_numbers.
+  const phoneList=await whatsappGraphRequest(
+    `/${encodeURIComponent(normalizedWabaId)}/phone_numbers?fields=id,display_phone_number,verified_name&limit=200`
+  );
+  const numbers=Array.isArray(phoneList?.data)?phoneList.data:[];
+  const belongs=numbers.some((item)=>String(item?.id||"")===normalizedPhoneNumberId);
+
+  if(!belongs){
+    throw new Error(
+      "O Phone Number ID informado não foi encontrado dentro do WhatsApp Business Account ID informado. " +
+      "Confirme os dois IDs e se o token da Cloud API tem acesso a esse WABA."
+    );
   }
 
-  if(String(phone?.id||"")!==String(resolvedPhone)) throw new Error("A Meta retornou um Phone Number ID diferente do informado.");
-  if(!resolvedWaba) throw new Error("Informe o WhatsApp Business Account ID (WABA ID).");
+  // 3) Inscreve o aplicativo no WABA. Sem esta inscrição, o webhook pode
+  // ser válido, mas os eventos de mensagens não chegam ao aplicativo.
+  const subscribed=await whatsappGraphRequest(
+    `/${encodeURIComponent(normalizedWabaId)}/subscribed_apps`,
+    {method:"POST",body:{}}
+  );
 
-  // O WABA é consultado diretamente e, em seguida, listamos seus números.
-  const waba=await whatsappGraphRequest(`/${encodeURIComponent(resolvedWaba)}?fields=id,name`);
-  if(String(waba?.id||"")!==String(resolvedWaba)) throw new Error("A Meta não confirmou o WhatsApp Business Account ID informado.");
-
-  const numbers=await whatsappGraphRequest(`/${encodeURIComponent(resolvedWaba)}/phone_numbers?fields=id,display_phone_number,verified_name&limit=100`);
-  const owns=(Array.isArray(numbers?.data)?numbers.data:[]).some(n=>String(n?.id||"")===String(resolvedPhone));
-  if(!owns) throw new Error("O Phone Number ID informado não pertence ao WhatsApp Business Account ID informado.");
-
-  // Inscreve o aplicativo no WABA para receber os eventos do webhook.
-  const subscribed=await whatsappGraphRequest(`/${encodeURIComponent(resolvedWaba)}/subscribed_apps`,{method:"POST",body:{}});
   return {
-    phoneNumberId:String(resolvedPhone),
-    displayPhoneNumber:phone.display_phone_number||null,
-    verifiedName:phone.verified_name||null,
-    businessAccountId:String(resolvedWaba),
-    correctedOrder:resolvedPhone!==suppliedPhone || resolvedWaba!==suppliedWaba,
+    phoneNumberId:normalizedPhoneNumberId,
+    displayPhoneNumber:owned.display_phone_number||null,
+    verifiedName:owned.verified_name||null,
+    businessAccountId:normalizedWabaId,
     subscribed:true,
     subscriptionResult:subscribed||null
   };
@@ -190,7 +182,7 @@ app.post("/api/webhook/whatsapp",async(req,res)=>{
           companyRow=(await pool.query(`SELECT user_id FROM companies WHERE whatsapp_phone_number_id=$1 LIMIT 1`,[WHATSAPP_ENV_PHONE_NUMBER_ID])).rows[0]||null;
         }
         if(!companyRow && businessAccountId){
-          companyRow=(await pool.query(`SELECT user_id FROM companies WHERE COALESCE(whatsapp_business_account_id,_id)=$1 ORDER BY updated_at DESC LIMIT 1`,[businessAccountId])).rows[0]||null;
+          companyRow=(await pool.query(`SELECT user_id FROM companies WHERE _id=$1 ORDER BY updated_at DESC LIMIT 1`,[businessAccountId])).rows[0]||null;
         }
         if(!companyRow){
           waDiag.unmatchedCount++;waDiag.lastUnmatchedAt=new Date().toISOString();
@@ -273,8 +265,6 @@ async function initDb(){
  await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS whatsapp_load_history BOOLEAN NOT NULL DEFAULT TRUE;`);
  await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS whatsapp_phone_number_id VARCHAR(40);`);
  await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS _id VARCHAR(40);`);
- await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS whatsapp_business_account_id VARCHAR(40);`);
- await pool.query(`UPDATE companies SET whatsapp_business_account_id=COALESCE(whatsapp_business_account_id,_id) WHERE whatsapp_business_account_id IS NULL AND _id IS NOT NULL;`);
  await pool.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS whatsapp_connected_at TIMESTAMPTZ;`);
 
  await pool.query(`CREATE TABLE IF NOT EXISTS products (
@@ -402,9 +392,9 @@ async function requireMessageCapacity(req,res,next){try{const e=req.entitlements
 async function requireProductCapacity(req,res,next){try{const e=req.entitlements||await getEntitlements(req.user.id);if(e.productsUsed>=e.productLimit)return res.status(429).json({error:`Seu plano permite até ${e.productLimit.toLocaleString('pt-BR')} produtos/serviços. Faça upgrade para cadastrar mais.`,code:"PRODUCT_LIMIT",limit:e.productLimit,used:e.productsUsed});req.entitlements=e;next()}catch(e){next(e)}}
 
 async function getPublicUser(userId){
- const q=await pool.query(`SELECT u.id,u.name,u.email,u.trial_started_at,u.trial_ends_at,c.name company_name,c.segment,c.website,c.whatsapp_link,c.whatsapp_load_history,c.whatsapp_phone_number_id,c.whatsapp_business_account_id,c._id,c.whatsapp_connected_at FROM users u LEFT JOIN companies c ON c.user_id=u.id WHERE u.id=$1`,[userId]);
+ const q=await pool.query(`SELECT u.id,u.name,u.email,u.trial_started_at,u.trial_ends_at,c.name company_name,c.segment,c.website,c.whatsapp_link,c.whatsapp_load_history,c.whatsapp_phone_number_id,c._id,c.whatsapp_connected_at FROM users u LEFT JOIN companies c ON c.user_id=u.id WHERE u.id=$1`,[userId]);
  const u=q.rows[0]; if(!u)return null; const access=await getEntitlements(userId);
- return {id:u.id,name:u.name,email:u.email,trialStartedAt:u.trial_started_at,trialEndsAt:u.trial_ends_at,access:{...access,canUse:access.canUse},company:{name:u.company_name||"",segment:u.segment||"",website:u.website||"",whatsappLink:u.whatsapp_link||"",whatsappLoadHistory:u.whatsapp_load_history!==false,whatsappPhoneNumberId:u.whatsapp_phone_number_id||"",whatsappBusinessAccountId:u.whatsapp_business_account_id||u._id||"",whatsappConnectedAt:u.whatsapp_connected_at||null}}
+ return {id:u.id,name:u.name,email:u.email,trialStartedAt:u.trial_started_at,trialEndsAt:u.trial_ends_at,access:{...access,canUse:access.canUse},company:{name:u.company_name||"",segment:u.segment||"",website:u.website||"",whatsappLink:u.whatsapp_link||"",whatsappLoadHistory:u.whatsapp_load_history!==false,whatsappPhoneNumberId:u.whatsapp_phone_number_id||"",whatsappBusinessAccountId:u._id||"",whatsappConnectedAt:u.whatsapp_connected_at||null}}
 }
 
 function normalize(v){return String(v??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim()}
@@ -545,7 +535,7 @@ async function googleKeys(){
  if(!response.ok)throw new Error("Não foi possível consultar as chaves do Google.");
  const data=await response.json();
  const cacheControl=response.headers.get("cache-control")||"";
- const maxAge=Number((cacheControl.match(/max-age=(\d+)/i)||[])[1]||3600);
+ const maxAge=Number((cacheControl.match(/max-age=(\\d+)/i)||[])[1]||3600);
  googleKeysCache=data.keys||[]; googleKeysExpiresAt=now+Math.max(300,Math.min(maxAge,86400))*1000;
  return googleKeysCache;
 }
@@ -602,12 +592,12 @@ app.post("/api/login",async(req,res)=>{const email=cleanText(req.body?.email,254
 app.get("/api/me",auth,async(req,res)=>{const u=await getPublicUser(req.user.id);if(!u)return res.status(404).json({error:"Usuário não encontrado."});res.json({user:u})});
 app.put("/api/company",auth,requireAccess,async(req,res)=>{const c={name:cleanText(req.body?.name,120),segment:cleanText(req.body?.segment,80),website:cleanText(req.body?.website,300),whatsappLink:cleanText(req.body?.whatsappLink,300)};if(!validUrl(c.website)||!validUrl(c.whatsappLink))return res.status(400).json({error:"Links devem começar com http:// ou https://"});await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link) VALUES($1,$2,$3,$4,$5) ON CONFLICT(user_id) DO UPDATE SET name=EXCLUDED.name,segment=EXCLUDED.segment,website=EXCLUDED.website,whatsapp_link=EXCLUDED.whatsapp_link,updated_at=NOW()`,[req.user.id,c.name,c.segment,c.website,c.whatsappLink]);res.json({company:c})});
 app.get("/api/whatsapp-status",auth,requireAccess,async(req,res)=>{
- const c=(await pool.query(`SELECT whatsapp_phone_number_id,whatsapp_business_account_id,_id,whatsapp_connected_at FROM companies WHERE user_id=$1`,[req.user.id])).rows[0]||{};
+ const c=(await pool.query(`SELECT whatsapp_phone_number_id,_id,whatsapp_connected_at FROM companies WHERE user_id=$1`,[req.user.id])).rows[0]||{};
  res.json({
    configured:!!WHATSAPP_ACCESS_TOKEN,
    tokenConfigured:!!WHATSAPP_ACCESS_TOKEN,
    phoneNumberId:c.whatsapp_phone_number_id||WHATSAPP_ENV_PHONE_NUMBER_ID||"",
-   businessAccountId:c.whatsapp_business_account_id||c._id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID||"",
+   businessAccountId:c._id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID||"",
    connected:!!c.whatsapp_phone_number_id,
    connectedAt:c.whatsapp_connected_at||null,
    lastEventAt:waDiag.lastEventAt,
@@ -621,9 +611,9 @@ app.get("/api/whatsapp-status",auth,requireAccess,async(req,res)=>{
 });
 app.get("/api/whatsapp-webhook-check",auth,requireAccess,async(req,res)=>{
   try{
-    const c=(await pool.query(`SELECT whatsapp_phone_number_id,whatsapp_business_account_id,_id,whatsapp_connected_at FROM companies WHERE user_id=$1`,[req.user.id])).rows[0]||{};
+    const c=(await pool.query(`SELECT whatsapp_phone_number_id,_id,whatsapp_connected_at FROM companies WHERE user_id=$1`,[req.user.id])).rows[0]||{};
     const phoneNumberId=c.whatsapp_phone_number_id||WHATSAPP_ENV_PHONE_NUMBER_ID||"";
-    const businessAccountId=c.whatsapp_business_account_id||c._id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID||"";
+    const businessAccountId=c._id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID||"";
     const checks={
       accessToken:!!WHATSAPP_ACCESS_TOKEN,
       verifyToken:!!WHATSAPP_VERIFY_TOKEN,
@@ -642,13 +632,13 @@ app.put("/api/whatsapp-connection",auth,requireAccess,async(req,res)=>{
  const phoneNumberId=cleanText(req.body?.phoneNumberId,40);
  const businessAccountId=cleanText(req.body?.businessAccountId,40);
  if(!phoneNumberId)return res.status(400).json({error:"Informe o Phone Number ID do WhatsApp Business."});
- if(!/^\d{8,20}$/.test(phoneNumberId))return res.status(400).json({error:"Informe o Phone Number ID numérico da Meta, não o número de telefone."});
- if(businessAccountId&&!/^\d{8,20}$/.test(businessAccountId))return res.status(400).json({error:"O WhatsApp Business Account ID deve conter somente dígitos."});
+ if(!/^\\d{8,20}$/.test(phoneNumberId))return res.status(400).json({error:"Informe o Phone Number ID numérico da Meta, não o número de telefone."});
+ if(businessAccountId&&!/^\\d{8,20}$/.test(businessAccountId))return res.status(400).json({error:"O WhatsApp Business Account ID deve conter somente dígitos."});
  if(!WHATSAPP_ACCESS_TOKEN)return res.status(503).json({error:"O WHATSAPP_ACCESS_TOKEN não está configurado no Render."});
  try{
    const meta=await validateAndSubscribeWhatsapp({phoneNumberId,businessAccountId});
-   await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link,whatsapp_load_history,whatsapp_phone_number_id,whatsapp_business_account_id,_id,whatsapp_connected_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8,NOW()) ON CONFLICT(user_id) DO UPDATE SET whatsapp_phone_number_id=EXCLUDED.whatsapp_phone_number_id,whatsapp_business_account_id=EXCLUDED.whatsapp_business_account_id,_id=EXCLUDED._id,whatsapp_connected_at=NOW(),updated_at=NOW()`,[req.user.id,"","","","",true,meta.phoneNumberId,meta.businessAccountId]);
-   res.json({ok:true,phoneNumberId:meta.phoneNumberId,businessAccountId:meta.businessAccountId,correctedOrder:!!meta.correctedOrder,meta,webhookUrl:WHATSAPP_WEBHOOK_URL});
+   await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link,whatsapp_load_history,whatsapp_phone_number_id,_id,whatsapp_connected_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW()) ON CONFLICT(user_id) DO UPDATE SET whatsapp_phone_number_id=EXCLUDED.whatsapp_phone_number_id,_id=EXCLUDED._id,whatsapp_connected_at=NOW(),updated_at=NOW()`,[req.user.id,"","","","",true,phoneNumberId,businessAccountId]);
+   res.json({ok:true,phoneNumberId,businessAccountId,meta,webhookUrl:WHATSAPP_WEBHOOK_URL});
  }catch(e){
    console.error("[RADAR] Falha ao validar/conectar WhatsApp:",e.message,e?.meta?.error||"");
    const status=e?.status===401||e?.status===403?502:(e?.status>=400&&e?.status<500?400:502);
@@ -657,13 +647,12 @@ app.put("/api/whatsapp-connection",auth,requireAccess,async(req,res)=>{
 });
 app.post("/api/whatsapp-test",auth,requireAccess,async(req,res)=>{
  try{
-   const c=(await pool.query(`SELECT whatsapp_phone_number_id,whatsapp_business_account_id,_id FROM companies WHERE user_id=$1`,[req.user.id])).rows[0]||{};
+   const c=(await pool.query(`SELECT whatsapp_phone_number_id,_id FROM companies WHERE user_id=$1`,[req.user.id])).rows[0]||{};
    const phoneNumberId=c.whatsapp_phone_number_id||WHATSAPP_ENV_PHONE_NUMBER_ID;
-   const businessAccountId=c.whatsapp_business_account_id||c._id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID;
+   const businessAccountId=c._id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID;
    if(!phoneNumberId)return res.status(400).json({ok:false,error:"Nenhum Phone Number ID cadastrado."});
    const meta=await validateAndSubscribeWhatsapp({phoneNumberId,businessAccountId});
-   await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link,whatsapp_load_history,whatsapp_phone_number_id,whatsapp_business_account_id,_id,whatsapp_connected_at) VALUES($1,$2,$3,$4,$5,COALESCE((SELECT whatsapp_load_history FROM companies WHERE user_id=$1),TRUE),$6,$7,$7,NOW()) ON CONFLICT(user_id) DO UPDATE SET whatsapp_phone_number_id=EXCLUDED.whatsapp_phone_number_id,whatsapp_business_account_id=EXCLUDED.whatsapp_business_account_id,_id=EXCLUDED._id,whatsapp_connected_at=NOW(),updated_at=NOW()`,[req.user.id,"","","","",meta.phoneNumberId,meta.businessAccountId]);
-   res.json({ok:true,phoneNumberId:meta.phoneNumberId,businessAccountId:meta.businessAccountId,correctedOrder:!!meta.correctedOrder,webhookUrl:WHATSAPP_WEBHOOK_URL,meta,diagnostic:{lastEventAt:waDiag.lastEventAt,lastMessageAt:waDiag.lastMessageAt,unmatchedCount:waDiag.unmatchedCount}});
+   res.json({ok:true,webhookUrl:WHATSAPP_WEBHOOK_URL,meta,diagnostic:{lastEventAt:waDiag.lastEventAt,lastMessageAt:waDiag.lastMessageAt,unmatchedCount:waDiag.unmatchedCount}});
  }catch(e){res.status(502).json({ok:false,error:e.message,webhookUrl:WHATSAPP_WEBHOOK_URL});}
 });
 

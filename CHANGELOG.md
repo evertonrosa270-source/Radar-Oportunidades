@@ -1,4 +1,4 @@
-Este arquivo explica como Visual Studio criou o projeto.
+# V1.6 — Correção da validação WhatsApp Meta\n\n- Corrigida a comparação indevida entre Phone Number ID e WABA ID.\n- A validação agora usa o endpoint do WABA `/phone_numbers` antes de assinar o app.\n\nEste arquivo explica como Visual Studio criou o projeto.
 
 As seguintes ferramentas foram usadas para gerar este projeto:
 - TypeScript Compiler (tsc)
