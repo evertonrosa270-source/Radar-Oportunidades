@@ -125,10 +125,23 @@ async function validateAndSubscribeWhatsapp({phoneNumberId,businessAccountId}){
   const belongs=numbers.some((item)=>String(item?.id||"")===normalizedPhoneNumberId);
 
   if(!belongs){
-    throw new Error(
+    const diagnostic={
+      wabaId:normalizedWabaId,
+      requestedPhoneNumberId:normalizedPhoneNumberId,
+      returnedCount:numbers.length,
+      returnedPhoneNumbers:numbers.map((item)=>({
+        id:String(item?.id||""),
+        displayPhoneNumber:item?.display_phone_number||null,
+        verifiedName:item?.verified_name||null
+      }))
+    };
+    const err=new Error(
       "O Phone Number ID informado não foi encontrado dentro do WhatsApp Business Account ID informado. " +
-      "Confirme os dois IDs e se o token da Cloud API tem acesso a esse WABA."
+      "Veja abaixo quais números a Meta devolveu para esse WABA."
     );
+    err.status=400;
+    err.diagnostic=diagnostic;
+    throw err;
   }
 
   // 3) Inscreve o aplicativo no WABA. Sem esta inscrição, o webhook pode
@@ -642,7 +655,10 @@ app.put("/api/whatsapp-connection",auth,requireAccess,async(req,res)=>{
  }catch(e){
    console.error("[RADAR] Falha ao validar/conectar WhatsApp:",e.message,e?.meta?.error||"");
    const status=e?.status===401||e?.status===403?502:(e?.status>=400&&e?.status<500?400:502);
-   res.status(status).json({error:`Não foi possível validar o WhatsApp na Meta: ${e.message}`});
+   res.status(status).json({
+     error:`Não foi possível validar o WhatsApp na Meta: ${e.message}`,
+     diagnostic:e?.diagnostic||null
+   });
  }
 });
 app.post("/api/whatsapp-test",auth,requireAccess,async(req,res)=>{
@@ -653,7 +669,7 @@ app.post("/api/whatsapp-test",auth,requireAccess,async(req,res)=>{
    if(!phoneNumberId)return res.status(400).json({ok:false,error:"Nenhum Phone Number ID cadastrado."});
    const meta=await validateAndSubscribeWhatsapp({phoneNumberId,businessAccountId});
    res.json({ok:true,webhookUrl:WHATSAPP_WEBHOOK_URL,meta,diagnostic:{lastEventAt:waDiag.lastEventAt,lastMessageAt:waDiag.lastMessageAt,unmatchedCount:waDiag.unmatchedCount}});
- }catch(e){res.status(502).json({ok:false,error:e.message,webhookUrl:WHATSAPP_WEBHOOK_URL});}
+ }catch(e){res.status(e?.status===400?400:502).json({ok:false,error:e.message,webhookUrl:WHATSAPP_WEBHOOK_URL,diagnostic:e?.diagnostic||null});}
 });
 
 app.put("/api/whatsapp-settings",auth,requireAccess,async(req,res)=>{const loadHistory=req.body?.loadHistory!==false;await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link,whatsapp_load_history) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(user_id) DO UPDATE SET whatsapp_load_history=EXCLUDED.whatsapp_load_history,updated_at=NOW()`,[req.user.id,"","","","",loadHistory]);res.json({whatsappLoadHistory:loadHistory})});

@@ -1,3 +1,9 @@
+# V1.7 — Diagnóstico Meta WhatsApp
+
+- Quando a Meta não encontra o Phone Number ID no WABA, o RADAR agora mostra o WABA consultado, o Phone Number ID procurado e a lista de Phone Numbers que a Meta realmente devolveu.
+- O diagnóstico não expõe o Access Token.
+- O mesmo diagnóstico aparece no teste de conexão e na ativação da integração.
+
 # V1.6 — Correção da validação WhatsApp Meta\n\n- Corrigida a comparação indevida entre Phone Number ID e WABA ID.\n- A validação agora usa o endpoint do WABA `/phone_numbers` antes de assinar o app.\n\nEste arquivo explica como Visual Studio criou o projeto.
 
 As seguintes ferramentas foram usadas para gerar este projeto:
