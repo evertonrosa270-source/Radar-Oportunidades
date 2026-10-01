@@ -174,7 +174,7 @@ function App(){
     const r=await fetch(API+"/whatsapp-connection",{method:"PUT",headers:headers(),body:JSON.stringify({phoneNumberId:whatsappPhoneNumberId,businessAccountId:whatsappBusinessAccountId})});
     const j=await r.json().catch(()=>({}));
     if(!r.ok){setNotice(j.error||"Não foi possível ativar a integração do WhatsApp Business.");return}
-    setWhatsappConnected(true);setNotice("WhatsApp Business conectado ao RADAR. O webhook poderá entregar as mensagens recebidas.");await load();
+    setWhatsappConnected(true);if(j.phoneNumberId)setWhatsappPhoneNumberId(String(j.phoneNumberId));if(j.businessAccountId)setWhatsappBusinessAccountId(String(j.businessAccountId));setNotice(j.correctedOrder?"Integração corrigida automaticamente: os IDs estavam invertidos e foram salvos na ordem correta.":"WhatsApp Business conectado ao RADAR. O webhook poderá entregar as mensagens recebidas.");await load();
   }catch{setNotice("Não foi possível conectar ao servidor.")}
  }
  async function saveCompany(e:any){e.preventDefault();setNotice("");const f=new FormData(e.currentTarget);const r=await fetch(API+"/company",{method:"PUT",headers:headers(),body:JSON.stringify({name:f.get("name"),segment:f.get("segment"),website:f.get("website"),whatsappLink:f.get("whatsappLink")})});if(r.ok){setNotice("Dados salvos com sucesso.");load()}}
