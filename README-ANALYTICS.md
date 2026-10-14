@@ -28,3 +28,8 @@
 - A origem é o domínio referenciador disponível no navegador; alguns navegadores e políticas de privacidade podem omiti-lo.
 - O painel só terá dados futuros após o deploy e após consentimento.
 - A política de privacidade foi atualizada com a descrição da coleta. Antes de lançamento comercial, o responsável pelo serviço deve revisar a política, identificar o controlador e incluir um canal de contato válido para solicitações LGPD.
+
+
+## Administração de clientes
+
+O menu administrativo também inclui **Clientes (admin)**, que lista contas, empresa, cadastro e situação da assinatura. A consulta `GET /api/admin/customers` exige JWT válido e correspondência exata entre o e-mail autenticado e `ADMIN_EMAIL`. Consulte `README-ADMIN-CLIENTES.md` para deploy e validação.

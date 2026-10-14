@@ -440,6 +440,28 @@ app.get("/api/admin/analytics",auth,requireAnalyticsAdmin,async(req,res,next)=>{
   res.json({days,onlineNow:online.rows[0]?.count||0,summary:summary.rows[0]||{visitors:0,pageviews:0,sessions:0},series:series.rows,pages:pages.rows,sources:sources.rows,types:types.rows,recurrence:recurrence.rows[0]||{new_visitors:0,returning_visitors:0},privacy:{storesIp:false,storesUserAgent:false,storesFullUrl:false,consentRequired:true}});
  }catch(e){next(e)}
 });
+app.get("/api/admin/customers",auth,requireAnalyticsAdmin,async(req,res,next)=>{
+ try{
+  const search=String(req.query.q||"").trim().slice(0,120);
+  const limitRaw=Number(req.query.limit||200);
+  const limit=Math.min(500,Math.max(1,Number.isFinite(limitRaw)?Math.floor(limitRaw):200));
+  const result=await pool.query(`
+   SELECT u.id,u.name,u.email,u.created_at,u.trial_started_at,u.trial_ends_at,
+          COALESCE(c.name,'') AS company_name,COALESCE(c.segment,'') AS company_segment,
+          latest.status AS subscription_status,latest.plan_name,latest.subscription_updated_at
+   FROM users u
+   LEFT JOIN companies c ON c.user_id=u.id
+   LEFT JOIN LATERAL (
+     SELECT s.status,p.name AS plan_name,s.updated_at AS subscription_updated_at
+     FROM subscriptions s LEFT JOIN plans p ON p.id=s.plan_id
+     WHERE s.user_id=u.id ORDER BY s.updated_at DESC NULLS LAST,s.created_at DESC LIMIT 1
+   ) latest ON TRUE
+   WHERE ($1='' OR u.name ILIKE '%'||$1||'%' OR u.email ILIKE '%'||$1||'%' OR c.name ILIKE '%'||$1||'%')
+   ORDER BY u.created_at DESC NULLS LAST LIMIT $2
+  `,[search,limit]);
+  res.json({customers:result.rows,total:result.rows.length,limit});
+ }catch(e){next(e)}
+});
 const PLAN_RULES={
  FREE_TRIAL:{label:"Free Trial",messageLimit:200,productLimit:20,historyDays:7,teamLimit:1,aiLevel:"Básica",aiReply:false,reports:"Básicos"},
  RADAR_START:{label:"Radar Start",messageLimit:500,productLimit:20,historyDays:7,teamLimit:1,aiLevel:"Básica",aiReply:false,reports:"Básicos"},
