@@ -54,6 +54,15 @@ const pool=new Pool({
 });
 
 const app=express(); app.disable("x-powered-by"); if(NODE_ENV==="production") app.set("trust proxy",1);
+// Logs operacionais do WhatsApp: registra chegada, rota e status sem expor tokens ou conteúdo de mensagens.
+app.use((req,res,next)=>{
+  if(req.path.startsWith("/api/whatsapp-") || req.path==="/api/webhook/whatsapp"){
+    const started=Date.now();
+    console.log(`[RADAR][HTTP] ${req.method} ${req.path} recebido`);
+    res.on("finish",()=>console.log(`[RADAR][HTTP] ${req.method} ${req.path} status=${res.statusCode} duracao_ms=${Date.now()-started}`));
+  }
+  next();
+});
 const DIST_DIR=path.join(process.cwd(),"dist");
 const DIST_INDEX=path.join(DIST_DIR,"index.html");
 app.use(helmet({contentSecurityPolicy:false,crossOriginResourcePolicy:{policy:"cross-origin"}}));
@@ -166,9 +175,9 @@ app.get("/api/webhook/whatsapp",(req,res)=>{
   const mode=String(req.query["hub.mode"]||"");
   const token=String(req.query["hub.verify_token"]||"");
   const challenge=String(req.query["hub.challenge"]||"");
-  if(!WHATSAPP_VERIFY_TOKEN) return res.status(503).send("Webhook do WhatsApp não configurado.");
-  if(mode==="subscribe" && token===WHATSAPP_VERIFY_TOKEN && challenge) return res.status(200).send(challenge);
-  return res.sendStatus(403);
+  if(!WHATSAPP_VERIFY_TOKEN){console.error("[RADAR] Verificação do webhook falhou: WHATSAPP_VERIFY_TOKEN ausente.");return res.status(503).send("Webhook do WhatsApp não configurado.");}
+  if(mode==="subscribe" && token===WHATSAPP_VERIFY_TOKEN && challenge){console.log("[RADAR] Webhook WhatsApp validado pela Meta.");return res.status(200).send(challenge);}
+  console.warn("[RADAR] Verificação do webhook recusada: modo/token/challenge inválido.");return res.sendStatus(403);
 });
 app.post("/api/webhook/whatsapp",async(req,res)=>{
   // A Meta espera uma resposta rápida. O processamento abaixo é curto e idempotente.
@@ -176,7 +185,7 @@ app.post("/api/webhook/whatsapp",async(req,res)=>{
     if(!validWhatsappSignature(req)){console.warn("[RADAR] Webhook WhatsApp rejeitado: assinatura inválida.");return res.sendStatus(401);}
     const body=req.body||{};
     waDiag.lastEventAt=new Date().toISOString();
-    console.log("[RADAR] Webhook WhatsApp recebido:",JSON.stringify(body));
+    console.log(`[RADAR] Webhook WhatsApp recebido: entries=${Array.isArray(body.entry)?body.entry.length:0}`);
     const entries=Array.isArray(body.entry)?body.entry:[];
     let processed=0;
     for(const entry of entries){
@@ -690,7 +699,7 @@ app.get("/api/whatsapp-status",auth,requireAccess,async(req,res)=>{
    tokenConfigured:!!WHATSAPP_ACCESS_TOKEN,
    phoneNumberId:c.whatsapp_phone_number_id||WHATSAPP_ENV_PHONE_NUMBER_ID||"",
    businessAccountId:c._id||WHATSAPP_ENV_BUSINESS_ACCOUNT_ID||"",
-   connected:!!c.whatsapp_phone_number_id,
+   connected:!!c.whatsapp_connected_at,
    connectedAt:c.whatsapp_connected_at||null,
    lastEventAt:waDiag.lastEventAt,
    lastMessageAt:waDiag.lastMessageAt,
@@ -723,10 +732,10 @@ app.get("/api/whatsapp-webhook-check",auth,requireAccess,async(req,res)=>{
 app.put("/api/whatsapp-connection",auth,requireAccess,async(req,res)=>{
  const phoneNumberId=cleanText(req.body?.phoneNumberId,40);
  const businessAccountId=cleanText(req.body?.businessAccountId,40);
- if(!phoneNumberId)return res.status(400).json({error:"Informe o Phone Number ID do WhatsApp Business."});
- if(!/^\\d{8,20}$/.test(phoneNumberId))return res.status(400).json({error:"Informe o Phone Number ID numérico da Meta, não o número de telefone."});
- if(businessAccountId&&!/^\\d{8,20}$/.test(businessAccountId))return res.status(400).json({error:"O WhatsApp Business Account ID deve conter somente dígitos."});
- if(!WHATSAPP_ACCESS_TOKEN)return res.status(503).json({error:"O WHATSAPP_ACCESS_TOKEN não está configurado no Render."});
+ if(!phoneNumberId){console.warn("[RADAR] Atualização WhatsApp recusada: Phone Number ID vazio.");return res.status(400).json({error:"Informe o Phone Number ID do WhatsApp Business."});}
+ if(!/^\d{8,20}$/.test(phoneNumberId)){console.warn("[RADAR] Atualização WhatsApp recusada: Phone Number ID fora do formato numérico esperado.");return res.status(400).json({error:"Informe o Phone Number ID numérico da Meta, não o número de telefone."});}
+ if(businessAccountId&&!/^\d{8,20}$/.test(businessAccountId)){console.warn("[RADAR] Atualização WhatsApp recusada: WABA ID fora do formato numérico esperado.");return res.status(400).json({error:"O WhatsApp Business Account ID deve conter somente dígitos."});}
+ if(!WHATSAPP_ACCESS_TOKEN){console.error("[RADAR] Atualização WhatsApp impossível: token da Cloud API ausente no ambiente.");return res.status(503).json({error:"O WHATSAPP_ACCESS_TOKEN não está configurado no Render."});}
  try{
    const meta=await validateAndSubscribeWhatsapp({phoneNumberId,businessAccountId});
    await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link,whatsapp_load_history,whatsapp_phone_number_id,_id,whatsapp_connected_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW()) ON CONFLICT(user_id) DO UPDATE SET whatsapp_phone_number_id=EXCLUDED.whatsapp_phone_number_id,_id=EXCLUDED._id,whatsapp_connected_at=NOW(),updated_at=NOW()`,[req.user.id,"","","","",true,phoneNumberId,businessAccountId]);
@@ -748,7 +757,7 @@ app.post("/api/whatsapp-test",auth,requireAccess,async(req,res)=>{
    if(!phoneNumberId)return res.status(400).json({ok:false,error:"Nenhum Phone Number ID cadastrado."});
    const meta=await validateAndSubscribeWhatsapp({phoneNumberId,businessAccountId});
    res.json({ok:true,webhookUrl:WHATSAPP_WEBHOOK_URL,meta,diagnostic:{lastEventAt:waDiag.lastEventAt,lastMessageAt:waDiag.lastMessageAt,unmatchedCount:waDiag.unmatchedCount}});
- }catch(e){res.status(e?.status===400?400:502).json({ok:false,error:e.message,webhookUrl:WHATSAPP_WEBHOOK_URL,diagnostic:e?.diagnostic||null});}
+ }catch(e){console.error("[RADAR] Teste da integração WhatsApp falhou:",e.message,e?.meta?.error||"");res.status(e?.status===400?400:502).json({ok:false,error:e.message,webhookUrl:WHATSAPP_WEBHOOK_URL,diagnostic:e?.diagnostic||null});}
 });
 
 app.put("/api/whatsapp-settings",auth,requireAccess,async(req,res)=>{const loadHistory=req.body?.loadHistory!==false;await pool.query(`INSERT INTO companies(user_id,name,segment,website,whatsapp_link,whatsapp_load_history) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(user_id) DO UPDATE SET whatsapp_load_history=EXCLUDED.whatsapp_load_history,updated_at=NOW()`,[req.user.id,"","","","",loadHistory]);res.json({whatsappLoadHistory:loadHistory})});
