@@ -88,7 +88,7 @@ const WHATSAPP_ENV_PHONE_NUMBER_ID=String(process.env.WHATSAPP_PHONE_NUMBER_ID||
 const WHATSAPP_ENV_BUSINESS_ACCOUNT_ID=String(process.env.WHATSAPP_BUSINESS_ACCOUNT_ID||"").trim();
 const WHATSAPP_APP_SECRET=String(process.env.WHATSAPP_APP_SECRET||process.env.META_APP_SECRET||"").trim();
 const WHATSAPP_GRAPH_VERSION=String(process.env.WHATSAPP_GRAPH_VERSION||"v23.0").trim();
-const WHATSAPP_WEBHOOK_URL=String(process.env.WHATSAPP_WEBHOOK_URL||`${APP_URL.replace(/\/$/,"")}/api/webhook/whatsapp`).trim();
+const WHATSAPP_WEBHOOK_URL=String(process.env.WHATSAPP_WEBHOOK_URL||"https://radar-oportunidades-xrn8.onrender.com/api/webhook/whatsapp").trim();
 const waDiag={lastEventAt:null,lastMessageAt:null,unmatchedCount:0,lastUnmatchedAt:null};
 async function whatsappGraphRequest(pathname,{method="GET",body=null}={}){
   if(!WHATSAPP_ACCESS_TOKEN) throw Object.assign(new Error("WHATSAPP_ACCESS_TOKEN não configurado no servidor."),{status:503});
