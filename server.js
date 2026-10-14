@@ -364,6 +364,21 @@ async function initDb(){
  await pool.query(`CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id);`);
  await pool.query(`CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);`);
 
+ // Métricas de visita: identificadores pseudônimos, sem IP, user-agent, query string ou dados de conta.
+ await pool.query(`CREATE TABLE IF NOT EXISTS analytics_events (
+   id BIGSERIAL PRIMARY KEY,
+   visitor_key VARCHAR(80) NOT NULL,
+   session_key VARCHAR(80) NOT NULL,
+   page_path VARCHAR(300) NOT NULL,
+   referrer_host VARCHAR(200),
+   visitor_type VARCHAR(20) NOT NULL CHECK (visitor_type IN ('public','authenticated')),
+   event_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+ );`);
+ await pool.query(`CREATE INDEX IF NOT EXISTS idx_analytics_events_at ON analytics_events(event_at DESC);`);
+ await pool.query(`CREATE INDEX IF NOT EXISTS idx_analytics_events_visitor_at ON analytics_events(visitor_key,event_at DESC);`);
+ await pool.query(`CREATE INDEX IF NOT EXISTS idx_analytics_events_session_at ON analytics_events(session_key,event_at DESC);`);
+ await pool.query(`DELETE FROM analytics_events WHERE event_at < NOW() - INTERVAL '180 days';`);
+
  await pool.query(`
    UPDATE plans p SET code='RADAR_START',price=29.90,interval='month',active=TRUE WHERE p.name='Radar Start' AND NOT EXISTS (SELECT 1 FROM plans x WHERE x.code='RADAR_START' AND x.id<>p.id);
    UPDATE plans p SET code='RADAR_PRO',price=49.90,interval='month',active=TRUE WHERE p.name='Radar Pro' AND NOT EXISTS (SELECT 1 FROM plans x WHERE x.code='RADAR_PRO' AND x.id<>p.id);
@@ -383,6 +398,48 @@ function validEmail(v){return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i.test(String(v||""
 function validUrl(v){if(!v)return true;try{const u=new URL(v);return ["http:","https:"].includes(u.protocol)}catch{return false}}
 function id(){return crypto.randomUUID()}
 function auth(req,res,next){const h=req.headers.authorization||"";if(!h.startsWith("Bearer "))return res.status(401).json({error:"Sessão inválida."});try{req.user=jwt.verify(h.slice(7),SECRET,{algorithms:["HS256"]});next()}catch{return res.status(401).json({error:"Sessão inválida ou expirada."})}}
+async function requireAnalyticsAdmin(req,res,next){
+ try{
+  if(!ADMIN_EMAIL)return res.status(503).json({error:"As estatísticas estão indisponíveis: configure ADMIN_EMAIL no servidor."});
+  const q=await pool.query("SELECT email FROM users WHERE id=$1",[req.user.id]);
+  if(!q.rows[0]||String(q.rows[0].email).toLowerCase()!==ADMIN_EMAIL)return res.status(403).json({error:"Acesso restrito ao administrador."});
+  next();
+ }catch(e){next(e)}
+}
+// Coleta somente eventos consentidos. Não persiste IP, user-agent, URL completa nem identidade autenticada.
+const analyticsLimiter=rateLimit({windowMs:60*1000,max:60,standardHeaders:true,legacyHeaders:false,message:{error:"Muitos eventos de visita. Tente novamente."}});
+app.post("/api/analytics/event",analyticsLimiter,async(req,res)=>{
+ try{
+  const b=req.body||{};
+  const visitorKey=String(b.visitorKey||""); const sessionKey=String(b.sessionKey||"");
+  const pagePath=String(b.pagePath||""); const referrerHost=String(b.referrerHost||"").slice(0,200)||null;
+  let visitorType="public";
+  const authorization=String(req.headers.authorization||"");
+  if(authorization.startsWith("Bearer ")){
+   try{const claims=jwt.verify(authorization.slice(7),SECRET,{algorithms:["HS256"]});const exists=await pool.query("SELECT 1 FROM users WHERE id=$1",[claims.id]);if(exists.rowCount)visitorType="authenticated";}catch{/* Token inválido não é tratado como sessão autenticada. */}
+  }
+  if(!/^[a-zA-Z0-9_-]{16,80}$/.test(visitorKey)||!/^[a-zA-Z0-9_-]{16,80}$/.test(sessionKey))return res.status(400).json({error:"Identificadores de sessão inválidos."});
+  if(!pagePath.startsWith("/")||pagePath.length>300||/[?#\\]/.test(pagePath))return res.status(400).json({error:"Caminho de página inválido."});
+  if(referrerHost&&!/^[a-zA-Z0-9.-]{1,200}$/.test(referrerHost))return res.status(400).json({error:"Origem inválida."});
+  await pool.query("INSERT INTO analytics_events(visitor_key,session_key,page_path,referrer_host,visitor_type) VALUES($1,$2,$3,$4,$5)",[visitorKey,sessionKey,pagePath,referrerHost,visitorType]);
+  res.status(202).json({ok:true});
+ }catch(e){res.status(500).json({error:"Não foi possível registrar a visita."})}
+});
+app.get("/api/admin/analytics",auth,requireAnalyticsAdmin,async(req,res,next)=>{
+ try{
+  const daysRaw=Number(req.query.days||30); const days=[7,30,90].includes(daysRaw)?daysRaw:30;
+  const [online,summary,series,pages,sources,types,recurrence]=await Promise.all([
+   pool.query(`SELECT COUNT(DISTINCT session_key)::int AS count FROM analytics_events WHERE event_at>=NOW()-INTERVAL '5 minutes'`),
+   pool.query(`SELECT COUNT(DISTINCT visitor_key)::int AS visitors,COUNT(*)::int AS pageviews,COUNT(DISTINCT session_key)::int AS sessions FROM analytics_events WHERE event_at>=NOW()-($1::int*INTERVAL '1 day')`,[days]),
+   pool.query(`SELECT to_char(day,'YYYY-MM-DD') AS date,COUNT(DISTINCT visitor_key)::int AS visitors,COUNT(*)::int AS pageviews FROM generate_series(date_trunc('day',NOW()-($1::int*INTERVAL '1 day')),date_trunc('day',NOW()),INTERVAL '1 day') day LEFT JOIN analytics_events e ON e.event_at>=day AND e.event_at<day+INTERVAL '1 day' GROUP BY day ORDER BY day`,[days]),
+   pool.query(`SELECT page_path AS page,COUNT(*)::int AS views,COUNT(DISTINCT visitor_key)::int AS visitors FROM analytics_events WHERE event_at>=NOW()-($1::int*INTERVAL '1 day') GROUP BY page_path ORDER BY views DESC LIMIT 10`,[days]),
+   pool.query(`SELECT COALESCE(referrer_host,'Acesso direto / não informado') AS source,COUNT(*)::int AS visits FROM analytics_events WHERE event_at>=NOW()-($1::int*INTERVAL '1 day') GROUP BY 1 ORDER BY visits DESC LIMIT 10`,[days]),
+   pool.query(`SELECT visitor_type AS type,COUNT(DISTINCT visitor_key)::int AS visitors FROM analytics_events WHERE event_at>=NOW()-($1::int*INTERVAL '1 day') GROUP BY visitor_type`,[days]),
+   pool.query(`WITH v AS (SELECT visitor_key,MIN(event_at) AS first_seen FROM analytics_events GROUP BY visitor_key) SELECT COUNT(*) FILTER(WHERE first_seen>=NOW()-($1::int*INTERVAL '1 day'))::int AS new_visitors,COUNT(*) FILTER(WHERE first_seen<NOW()-($1::int*INTERVAL '1 day'))::int AS returning_visitors FROM v WHERE visitor_key IN (SELECT DISTINCT visitor_key FROM analytics_events WHERE event_at>=NOW()-($1::int*INTERVAL '1 day'))`,[days])
+  ]);
+  res.json({days,onlineNow:online.rows[0]?.count||0,summary:summary.rows[0]||{visitors:0,pageviews:0,sessions:0},series:series.rows,pages:pages.rows,sources:sources.rows,types:types.rows,recurrence:recurrence.rows[0]||{new_visitors:0,returning_visitors:0},privacy:{storesIp:false,storesUserAgent:false,storesFullUrl:false,consentRequired:true}});
+ }catch(e){next(e)}
+});
 const PLAN_RULES={
  FREE_TRIAL:{label:"Free Trial",messageLimit:200,productLimit:20,historyDays:7,teamLimit:1,aiLevel:"Básica",aiReply:false,reports:"Básicos"},
  RADAR_START:{label:"Radar Start",messageLimit:500,productLimit:20,historyDays:7,teamLimit:1,aiLevel:"Básica",aiReply:false,reports:"Básicos"},
